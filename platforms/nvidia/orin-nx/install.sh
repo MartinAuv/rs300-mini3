@@ -186,8 +186,14 @@ install_extlinux_entry() {
     fdt="$(extlinux_value "$source_label" FDT)"
     append="$(extlinux_value "$source_label" APPEND)"
     overlays="$(extlinux_value "$source_label" OVERLAYS)"
-    rs300_fdt="$(extlinux_value rs300_cam1_dtb FDT)"
-    [ -n "$rs300_fdt" ] || rs300_fdt="$fdt"
+    
+    # NEU: FDT je nach Parameter anpassen
+    if [ "$SET_DEFAULT" -eq 1 ]; then
+        rs300_fdt="/boot/rs300-cam1-active.dtb"
+    else
+        rs300_fdt="$(extlinux_value rs300_cam1_dtb FDT)"
+        [ -n "$rs300_fdt" ] || rs300_fdt="$fdt"
+    fi
 
     [ -n "$linux" ] || linux="/boot/Image"
     [ -n "$initrd" ] || initrd="/boot/initrd"
@@ -239,19 +245,40 @@ install_extlinux_entry() {
 }
 
 find_rs300_base_dtb() {
-    local fdt
+    local fdt cand pat
+    shopt -s nullglob extglob
 
     fdt="$(extlinux_value rs300_cam1 FDT || true)"
-    [ -n "$fdt" ] || fdt="$(extlinux_value rs300_cam1_dtb FDT || true)"
-    [ -n "$fdt" ] || fdt="${BOOT_DIR}/kernel_tegra234-auvidea-jnx120x+p3767-0000-nv-rs300-cam1.dtb"
+    if [ -n "$fdt" ] && [ -f "$fdt" ]; then
+        echo "Using base DTB for merge: $fdt (source: extlinux rs300_cam1)" >&2
+        printf '%s\n' "$fdt"; return 0
+    fi
 
-    [ -f "$fdt" ] || {
-        echo "Could not find an RS300 base DTB. Expected $fdt" >&2
-        return 1
-    }
+    fdt="$(extlinux_value rs300_cam1_dtb FDT || true)"
+    if [ -n "$fdt" ] && [ -f "$fdt" ]; then
+        echo "Using base DTB for merge: $fdt (source: extlinux rs300_cam1_dtb)" >&2
+        printf '%s\n' "$fdt"; return 0
+    fi
 
-    printf '%s\n' "$fdt"
+    local patterns=(
+        "${BOOT_DIR}/kernel_tegra234-auvidea-jnx120?(x)+p3767-[0-9][0-9][0-9][0-9]-nv-rs300-cam1.dtb"
+        "${BOOT_DIR}/kernel_tegra234-auvidea-jnx120?(x)+p3767-[0-9][0-9][0-9][0-9]-nv.dtb"
+        "${BOOT_DIR}/tegra234-p3737-[0-9][0-9][0-9][0-9]+p3701-[0-9][0-9][0-9][0-9]-nv.dtb"
+    )
+
+    for pat in "${patterns[@]}"; do
+        for cand in $pat; do
+            if [ -f "$cand" ]; then
+                echo "Using base DTB for merge: $cand" >&2
+                printf '%s\n' "$cand"; return 0
+            fi
+        done
+    done
+
+    echo "Could not find an RS300 base DTB. Expected one of the known patterns in ${BOOT_DIR}" >&2
+    return 1
 }
+
 
 active_slot_dtb_partlabel() {
     local slot
@@ -316,11 +343,11 @@ DEV_ARG="${1:-auto}"
 WIDTH=640
 HEIGHT=512
 PIX=UYVY
-VALID_FRAMES=30
+VALID_FRAMES=90
 EXPECT=$((WIDTH * HEIGHT * 2 * VALID_FRAMES))
 FRAME_SIZE=$((WIDTH * HEIGHT * 2))
-CHECK_FRAME=10
-OUT=/run/rs300-validate.raw
+CHECK_FRAME=80
+OUT=/tmp/rs300-validate.raw
 
 log() {
     logger -t rs300-validate "$*"
@@ -413,8 +440,21 @@ After=systemd-udev-settle.service
 
 [Service]
 Type=oneshot
-ExecStart=/sbin/modprobe rs300
-ExecStartPost=${VALIDATE_SCRIPT} ${VIDEO_DEV}
+1. Dem Jetson 3 Sekunden Zeit geben, bis alle Power-Domains stehen
+ExecStartPre=/bin/sleep 3
+
+2. Treiber laden (1. Versuch / Power-On)
+ExecStart=/sbin/modprobe rs300 set_fps_cmd=1 native_y16=1 power_on_delay_ms=1500
+
+3. Soft-Reset: Kurz warten, entladen, neu laden (das erzwingt dein funktionierendes Schema)
+ExecStartPost=/bin/sleep 1
+ExecStartPost=-/sbin/rmmod rs300
+ExecStartPost=/bin/sleep 1
+ExecStartPost=/sbin/modprobe rs300 set_fps_cmd=1 native_y16=1 power_on_delay_ms=4500
+
+# 4. Erst jetzt das Validate-Skript starten
+ExecStartPost=/usr/local/sbin/rs300-validate.sh auto
+
 RemainAfterExit=yes
 
 [Install]
@@ -442,7 +482,7 @@ depmod -a
 
 cat >"$MODPROBE_CONF" <<'EOF'
 blacklist rs300
-options rs300 mode=0 fps=60 set_fps_cmd=0 type=16 output_source=-1 yuv_order=2 start_path=1 start_dst=1 start_width=0 start_height=0 advertise_width=0 advertise_height=0 power_on_delay_ms=8000 auto_shutter=0 startup_ffc=0 native_y16=0
+options rs300 mode=0 fps=60 set_fps_cmd=1 type=16 output_source=-1 yuv_order=2 start_path=1 start_dst=1 start_width=0 start_height=0 advertise_width=0 advertise_height=0 power_on_delay_ms=8000 auto_shutter=0 startup_ffc=0 native_y16=0
 EOF
 
 if [ "$INSTALL_SERVICE" -eq 1 ]; then
@@ -470,4 +510,20 @@ fi
 if [ "$INSTALL_SERVICE" -eq 1 ]; then
     echo "Enabled rs300-load.service with ${VIDEO_DEV} validation."
 fi
-echo "Reboot, then check: systemctl status rs300-load.service"
+
+# NEU: Abhängigkeiten installieren
+echo "Installing required dependencies (GStreamer, OpenCV, v4l-utils)..."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y || true
+apt-get install -y \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly \
+    gstreamer1.0-libav \
+    libgstreamer-plugins-base1.0-dev \
+    nvidia-l4t-gstreamer \
+    python3-opencv \
+    v4l-utils
+
+echo "Installation complete. Reboot, then check: systemctl status rs300-load.service"

@@ -56,10 +56,10 @@
 					default_gain = "1";
 					min_hdr_ratio = "1";
 					max_hdr_ratio = "1";
-					min_framerate = "60000000";
+					min_framerate = "30000000";
 					max_framerate = "60000000";
 					step_framerate = "1";
-					default_framerate = "60000000";
+					default_framerate = "30000000";
 					min_exp_time = "1";
 					max_exp_time = "16666";
 					step_exp_time = "1";
@@ -80,8 +80,8 @@
 							bus-width = <2>;
 							bus-type = <4>;
 							data-lanes = <1 2>;
-							link-frequencies = /bits/ 64 <80000000>;
 							clock-noncontinuous;
+							link-frequencies = /bits/ 64 <80000000>;
 							remote-endpoint = <&rbpcv2_imx219_csi_in1>;
 						};
 					};

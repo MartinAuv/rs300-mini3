@@ -114,7 +114,7 @@ static const char * const output_mode_menu[] = {
 /* Physical Mini2/WN2 modules have a fixed resolution; select it at load time. */
 static int mode = 0; // 0-640; 1-256; 2-384
 static int fps = 60;
-static int set_fps_cmd = 0;
+static int set_fps_cmd = 1;
 static int type = 16;
 static int output_source = -1;
 static int yuv_order = 2;
@@ -130,7 +130,7 @@ static int probe_prime_stop_ms = 300;
 static int prestart_prime_cycles = 0;
 static int prestart_prime_ms = 1000;
 static int prestart_prime_stop_ms = 300;
-static int power_on_delay_ms = 8000;
+static int power_on_delay_ms = 15000;
 static int auto_shutter = 0;
 static int startup_ffc = 0;
 static int native_y16 = 0;
@@ -2343,7 +2343,7 @@ static int rs300_set_stream_state(struct rs300 *rs300, int enable)
                              "Temporal NR default %d set failed: %d (continuing)",
                              rs300->temporal_nr->val, ret);
             }
-
+			/*
             if (rs300->frame_rate) {
                 ret = rs300_set_frame_rate(rs300, rs300->frame_rate->val);
                 if (ret)
@@ -2351,7 +2351,7 @@ static int rs300_set_stream_state(struct rs300 *rs300, int enable)
                              "Detector frame-rate default %d set failed: %d (continuing)",
                              rs300->frame_rate->val, ret);
             }
-
+			*/
             rs300->stream_defaults_initialized = true;
         }
 
