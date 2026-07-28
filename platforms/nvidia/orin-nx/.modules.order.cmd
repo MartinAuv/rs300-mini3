@@ -1,1 +1,0 @@
-cmd_/home/auvidea/rs300-mini3/platforms/nvidia/orin-nx/modules.order := {   echo /home/auvidea/rs300-mini3/platforms/nvidia/orin-nx/rs300.ko; :; } | awk '!x[$$0]++' - > /home/auvidea/rs300-mini3/platforms/nvidia/orin-nx/modules.order
