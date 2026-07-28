@@ -1,1 +1,0 @@
-cmd_/home/auvidea/rs300-mini3/platforms/nvidia/orin-nx/rs300.o := ld -EL  -maarch64elf -z noexecstack   -r -o /home/auvidea/rs300-mini3/platforms/nvidia/orin-nx/rs300.o @/home/auvidea/rs300-mini3/platforms/nvidia/orin-nx/rs300.mod
