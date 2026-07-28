@@ -1,1 +1,0 @@
-cmd_/home/auvidea/rs300-mini3/platforms/nvidia/orin-nx/rs300.mod := printf '%s\n'   src/rs300.o | awk '!x[$$0]++ { print("/home/auvidea/rs300-mini3/platforms/nvidia/orin-nx/"$$0) }' > /home/auvidea/rs300-mini3/platforms/nvidia/orin-nx/rs300.mod
