@@ -56,7 +56,7 @@ The installer:
   `/boot/rs300-backups`. Use `--no-slot-dtb` only if your bootloader is known
   to honor extlinux `FDT`/`OVERLAYS` directly.
 - Enables `rs300-load.service` (which powers up the camera after boot, soft-resets the module, and validates 90 frames at `640x512`)
-- Marks `stream_thermal.sh` and `stream_thermal.py` executable
+- Marks `setup_streamIP.sh` and `stream_thermal.py` executable
 
 ## Quick Start: Stream Thermal Video Over the Network
 
@@ -66,11 +66,11 @@ Once the Jetson is installed and booted:
 
 ```sh
 cd rs300-mini3/platforms/nvidia/orin-nx
-./stream_thermal.sh
+./setup_streamIP.sh
 ```
 
 The script will:
-- Prompt for the destination IP address (press `Enter` for the default `192.168.103.166`, or pass it directly via `./stream_thermal.sh <TARGET_IP> [PORT]`),
+- Prompt for the destination IP address (press `Enter` for the default `192.168.103.166`, or pass it directly via `./setup_streamIP.sh <TARGET_IP> [PORT]`),
 - Wait automatically if `rs300-load.service` is still finishing its boot-time initialization,
 - Auto-detect the RS300 `/dev/video*` node and ensure `output_mode=1` (16-bit thermal mode) is active,
 - Normalize the 16-bit raw thermal data with exponential min/max smoothing (`alpha = 0.1`) to 8-bit and stream H.264 over RTP/UDP (port `5000`).

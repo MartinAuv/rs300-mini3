@@ -635,7 +635,7 @@ install -D -m 0644 rs300.ko "${MODULE_DIR}/rs300.ko"
 install -D -m 0644 "${DTBO_NAME}" "$DTBO_DEST"
 depmod -a
 
-[ -f "${SCRIPT_DIR}/stream_thermal.sh" ] && chmod 0755 "${SCRIPT_DIR}/stream_thermal.sh"
+[ -f "${SCRIPT_DIR}/setup_streamIP.sh" ] && chmod 0755 "${SCRIPT_DIR}/setup_streamIP.sh"
 [ -f "${SCRIPT_DIR}/stream_thermal.py" ] && chmod 0755 "${SCRIPT_DIR}/stream_thermal.py"
 
 cat >"$MODPROBE_CONF" <<'EOF'
