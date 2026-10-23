@@ -160,9 +160,11 @@ rewrite_extlinux_label() {
 
         $1 == "LABEL" {
             if (in_target) {
-                emit_label()
+                if (!emitted) {
+                    emit_label()
+                    emitted = 1
+                }
                 in_target = 0
-                emitted = 1
             }
             if ($2 == label) {
                 in_target = 1
@@ -174,8 +176,10 @@ rewrite_extlinux_label() {
 
         END {
             if (in_target) {
-                emit_label()
-                emitted = 1
+                if (!emitted) {
+                    emit_label()
+                    emitted = 1
+                }
             } else if (!emitted) {
                 print ""
                 emit_label()
@@ -550,6 +554,69 @@ EOF
     systemctl enable rs300-load.service
 }
 
+ensure_custom_carrier_dpkg_safe() {
+    # On custom carrier boards like Auvidea JNX120X (COMPATIBLE_SPEC=*auvidea*),
+    # NVIDIA's stock nvidia-l4t-bootloader.postinst and
+    # /etc/kernel/postinst.d/xx-nvidia-update-kernel-partitions fail with exit
+    # code 3 ("Cannot get compatible board name") because NVIDIA's stock BUP
+    # payload updater only recognizes stock *jetson-orin-nano*-devkit* specs.
+    # Both scripts explicitly check for the sentinel file below to skip stock
+    # devkit BUP flashing safely.
+    if [ -f /etc/nv_boot_control.conf ] && grep -qi 'auvidea' /etc/nv_boot_control.conf; then
+        mkdir -p /opt/nvidia/l4t-packages
+        touch /opt/nvidia/l4t-packages/.nv-l4t-disable-boot-fw-update-in-preinstall
+        apt-mark hold \
+            nvidia-l4t-bootloader \
+            nvidia-l4t-initrd \
+            nvidia-l4t-kernel \
+            nvidia-l4t-kernel-dtbs \
+            nvidia-l4t-kernel-headers \
+            nvidia-l4t-kernel-oot-headers \
+            nvidia-l4t-kernel-oot-modules >/dev/null 2>&1 || true
+    fi
+
+    export DEBIAN_FRONTEND=noninteractive
+    dpkg --configure -a || true
+}
+
+install_runtime_dependencies() {
+    local pkgs=(
+        device-tree-compiler
+        gstreamer1.0-plugins-base
+        gstreamer1.0-plugins-good
+        gstreamer1.0-plugins-bad
+        gstreamer1.0-libav
+        libgstreamer-plugins-base1.0-dev
+        python3-opencv
+        v4l-utils
+    )
+    local missing=()
+    local pkg
+
+    if ! dpkg -s nvidia-l4t-gstreamer >/dev/null 2>&1; then
+        pkgs+=(nvidia-l4t-gstreamer)
+    fi
+
+    for pkg in "${pkgs[@]}"; do
+        if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+            missing+=("$pkg")
+        fi
+    done
+
+    if [ "${#missing[@]}" -eq 0 ]; then
+        echo "All required runtime dependencies (GStreamer, OpenCV, v4l-utils, dtc) are already installed."
+        return 0
+    fi
+
+    echo "Installing missing dependencies: ${missing[*]}..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y || true
+    apt-get install -y --no-upgrade "${missing[@]}"
+}
+
+ensure_custom_carrier_dpkg_safe
+install_runtime_dependencies
+
 need_cmd make
 need_cmd install
 need_cmd depmod
@@ -600,19 +667,5 @@ fi
 if [ "$INSTALL_SERVICE" -eq 1 ]; then
     echo "Enabled rs300-load.service with ${VIDEO_DEV} validation."
 fi
-
-echo "Installing required dependencies (GStreamer, OpenCV, v4l-utils)..."
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -y || true
-apt-get install -y \
-    device-tree-compiler \
-    gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good \
-    gstreamer1.0-plugins-bad \
-    gstreamer1.0-libav \
-    libgstreamer-plugins-base1.0-dev \
-    nvidia-l4t-gstreamer \
-    python3-opencv \
-    v4l-utils
 
 echo "Installation complete. Reboot, then check: systemctl status rs300-load.service"
