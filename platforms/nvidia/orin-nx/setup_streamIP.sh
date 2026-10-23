@@ -4,19 +4,31 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_IP="192.168.103.166"
 DEFAULT_PORT="5000"
+STREAM_LAYOUT="${STREAM_LAYOUT:-separate}"
 
-find_rs300_video() {
-    local candidate
+if [ "${1:-}" = "--sbs" ]; then
+    STREAM_LAYOUT="sbs"
+    shift
+fi
+
+find_rs300_videos() {
+    local candidate found=0
+    local list=()
     for candidate in /dev/video*; do
         [ -e "$candidate" ] || continue
         if command -v v4l2-ctl >/dev/null 2>&1; then
             if v4l2-ctl -d "$candidate" --info 2>/dev/null |
                 grep -Eiq 'Card type[[:space:]]*:.*(rs300|wn2640)'; then
-                printf '%s\n' "$candidate"
-                return 0
+                list+=("$candidate")
+                found=1
             fi
         fi
     done
+
+    if [ "$found" -eq 1 ]; then
+        printf '%s\n' "${list[*]}"
+        return 0
+    fi
 
     if [ -e /dev/video0 ]; then
         printf '%s\n' "/dev/video0"
@@ -26,19 +38,18 @@ find_rs300_video() {
     return 1
 }
 
-find_rs300_subdev() {
+configure_rs300_subdevs() {
     local subdev name_file
+    command -v v4l2-ctl >/dev/null 2>&1 || return 0
     for name_file in /sys/class/video4linux/v4l-subdev*/name; do
         [ -r "$name_file" ] || continue
         if grep -Eiq '(rs300|wn2640)' "$name_file" 2>/dev/null; then
             subdev="/dev/$(basename "$(dirname "$name_file")")"
-            [ -e "$subdev" ] && {
-                printf '%s\n' "$subdev"
-                return 0
-            }
+            if [ -e "$subdev" ]; then
+                v4l2-ctl -d "$subdev" --set-ctrl=output_mode=1 >/dev/null 2>&1 || true
+            fi
         fi
     done
-    return 1
 }
 
 valid_ipv4() {
@@ -90,21 +101,19 @@ if ! lsmod | grep -q '^rs300\b'; then
     sudo modprobe rs300 set_fps_cmd=1 power_on_delay_ms=4500
 fi
 
-# 4. Auto-detect RS300 video device
-RS300_DEVICE="$(find_rs300_video || true)"
-if [ -z "$RS300_DEVICE" ]; then
+# 4. Auto-detect all RS300 video devices (CSI 0 /dev/video0 and CSI 1 /dev/video1)
+RS300_DEVICES="$(find_rs300_videos || true)"
+if [ -z "$RS300_DEVICES" ]; then
     echo "Fehler: Keine RS300/WN2640 Kamera unter /dev/video* gefunden." >&2
     exit 1
 fi
 
-# 5. Ensure camera subdevice is in 16-bit thermal mode (output_mode=1) for 16-bit normalization
-RS300_SUBDEV="$(find_rs300_subdev || true)"
-if [ -n "$RS300_SUBDEV" ] && command -v v4l2-ctl >/dev/null 2>&1; then
-    v4l2-ctl -d "$RS300_SUBDEV" --set-ctrl=output_mode=1 >/dev/null 2>&1 || true
-fi
+# 5. Ensure all RS300 camera subdevices are in 16-bit thermal mode (output_mode=1)
+configure_rs300_subdevs
 
-export RS300_DEVICE
+export RS300_DEVICES
 export DEST_IP
 export DEST_PORT
+export STREAM_LAYOUT
 
 exec python3 "${SCRIPT_DIR}/stream_thermal.py" "$DEST_IP" "$DEST_PORT"

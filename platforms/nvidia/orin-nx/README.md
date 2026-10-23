@@ -1,6 +1,6 @@
 # Mini2 / Mini3 / UVD640 / RS300 / WN2640 Thermal Camera - NVIDIA Jetson Orin NX
 
-Status: supported on CAM1 with an Auvidea JNX120 / JNX120X Orin NX carrier across:
+Status: supported on **CAM0 (CSI 0)** and **CAM1 (CSI 1)** (single or dual parallel operation) with an Auvidea JNX120 / JNX120X Orin NX carrier across:
 - **JetPack 7.2 / L4T R39.2** (`6.8.12-1021-tegra`, `/usr/src/nvidia/nvidia-public`, shared `tegra234-auvidea-jnx42+p3767-0000-nv.dtb` + UEFI overlays)
 - **JetPack 6.x / L4T R36.x** (`5.15.x-tegra`, `/usr/src/nvidia/nvidia-oot`, `tegra234-auvidea-jnx120+p3767-0000-nv.dtb`)
 
@@ -11,16 +11,13 @@ radiometric temperature data.
 
 ## Hardware Path
 
-- Connector: CAM1 / CSI1 on the Auvidea JNX120 / JNX120X carrier
-- I2C: `i2c-10`, mux channel 1, camera address `0x3c`
-- Video node: `/dev/video0` (when CAM0 is unpopulated) or `/dev/video1`
-- Subdevice: usually `/dev/v4l-subdev2` (or `/dev/v4l-subdev0`)
-- CSI: 2 lanes, 80 MHz link frequency
-- Fixed sensor mode: `640x512` at 60 fps
-- Tegra media bus format: `UYVY8_2X8`
-- Camera-side YUV order: `YUYV`
-- Power enable: CAM1 `PAC.00`, visible as `gpiochip0` line `138`; in the
-  Tegra234 device tree this is GPIO ID `160` (`TEGRA234_MAIN_GPIO(AC, 0)`).
+- **Connectors**:
+  - **CAM0 / CSI 0**: `i2c-9` (mux channel 0, `0x3c`), `serial_a` (`port-index = <0>`), `/dev/video0`, power enable `CAM0_PWDN` (`PH.06`, DT GPIO ID `62` / `TEGRA234_MAIN_GPIO(H, 6)`)
+  - **CAM1 / CSI 1**: `i2c-10` (mux channel 1, `0x3c`), `serial_c` (`port-index = <2>`), `/dev/video1`, power enable `CAM1_PWDN` (`PAC.00`, DT GPIO ID `160` / `TEGRA234_MAIN_GPIO(AC, 0)`)
+- **CSI**: 2 lanes per camera, 80 MHz link frequency
+- **Fixed sensor mode**: `640x512` at 60 fps
+- **Tegra media bus format**: `UYVY8_2X8`
+- **Camera-side YUV order**: `YUYV`
 
 The Jetson VI exposes the stream as `UYVY`. For human display the useful
 thermal luma is interpreted as `YUY2`; see the GStreamer section.
@@ -72,19 +69,23 @@ cd rs300-mini3/platforms/nvidia/orin-nx
 The script will:
 - Prompt for the destination IP address (press `Enter` for the default `192.168.103.166`, or pass it directly via `./setup_streamIP.sh <TARGET_IP> [PORT]`),
 - Wait automatically if `rs300-load.service` is still finishing its boot-time initialization,
-- Auto-detect the RS300 `/dev/video*` node and ensure `output_mode=1` (16-bit thermal mode) is active,
-- Normalize the 16-bit raw thermal data with exponential min/max smoothing (`alpha = 0.1`) to 8-bit and stream H.264 over RTP/UDP (port `5000`).
+- Auto-detect all physically connected RS300 `/dev/video*` nodes (`CSI 0` and/or `CSI 1`) and ensure `output_mode=1` (16-bit thermal mode) is active on each subdevice,
+- Normalize each camera's 16-bit raw thermal data with exponential min/max smoothing (`alpha = 0.1`) to 8-bit and stream H.264 over RTP/UDP:
+  - **1 camera connected** (`CSI 0` or `CSI 1`): streams to `udp://<TARGET_IP>:5000`
+  - **2 cameras connected (`CSI 0` + `CSI 1`)**: streams both in parallel (`CSI 0` -> `udp://<TARGET_IP>:5000`, `CSI 1` -> `udp://<TARGET_IP>:5001`), or combined side-by-side (`1280x512` on port `5000`) if started with `./setup_streamIP.sh --sbs`
 
-2. **On the receiving PC (`<TARGET_IP>`)**, view the H.264 stream with GStreamer:
+2. **On the receiving PC (`<TARGET_IP>`)**, view the H.264 stream(s) with GStreamer:
 
 ```sh
+# Camera 0 (or single camera / --sbs combined stream) on Port 5000:
 gst-launch-1.0 -e \
   udpsrc port=5000 caps='application/x-rtp,media=(string)video,clock-rate=(int)90000,encoding-name=(string)H264,payload=(int)96' \
-  ! rtph264depay \
-  ! h264parse \
-  ! avdec_h264 \
-  ! videoconvert \
-  ! autovideosink sync=false
+  ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! autovideosink sync=false
+
+# Camera 1 (when running 2 cameras on separate ports) on Port 5001:
+gst-launch-1.0 -e \
+  udpsrc port=5001 caps='application/x-rtp,media=(string)video,clock-rate=(int)90000,encoding-name=(string)H264,payload=(int)96' \
+  ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! autovideosink sync=false
 ```
 
 ---

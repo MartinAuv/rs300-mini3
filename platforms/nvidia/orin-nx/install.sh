@@ -367,6 +367,8 @@ build_merged_dtb() {
         fdtput -d "$tmp_dtb" /chosen linux,initrd-end 2>/dev/null || true
     fi
 
+    fdtget "$tmp_dtb" /bus@0/cam_i2cmux/i2c@0/rs300@3c compatible >/dev/null
+    fdtget "$tmp_dtb" /bus@0/cam_i2cmux/i2c@0/rs300@3c power-gpios >/dev/null
     fdtget "$tmp_dtb" /bus@0/cam_i2cmux/i2c@1/rs300@3c compatible >/dev/null
     fdtget "$tmp_dtb" /bus@0/cam_i2cmux/i2c@1/rs300@3c power-gpios >/dev/null
     fdtget "$tmp_dtb" /bus@0/gpio@c2f0000/gbe-switch-rst label >/dev/null
@@ -443,18 +445,19 @@ log() {
     echo "rs300-validate: $*"
 }
 
-find_rs300_video() {
+find_rs300_videos() {
+    found=0
     for candidate in /dev/video*; do
         [ -e "$candidate" ] || continue
 
         if v4l2-ctl -d "$candidate" --info 2>/dev/null |
             grep -Eiq 'Card type[[:space:]]*:.*(rs300|wn2640)'; then
             printf '%s\n' "$candidate"
-            return 0
+            found=1
         fi
     done
 
-    return 1
+    [ "$found" -eq 1 ]
 }
 
 frame_has_signal() {
@@ -466,65 +469,81 @@ frame_has_signal() {
         '
 }
 
+validate_one_dev() {
+    dev="$1"
+    for attempt in 1 2; do
+        log "attempt $attempt: validating $dev"
+        rm -f "$OUT"
+
+        timeout 15s v4l2-ctl -d "$dev" \
+            --set-fmt-video=width=${WIDTH},height=${HEIGHT},pixelformat=${PIX} \
+            --stream-mmap=4 --stream-count=${VALID_FRAMES} --stream-to="$OUT" >/dev/null 2>&1
+        rc=$?
+        size=0
+        [ -f "$OUT" ] && size=$(stat -c%s "$OUT" 2>/dev/null || echo 0)
+
+        if [ "$rc" -eq 0 ] && [ "$size" -eq "$EXPECT" ] && frame_has_signal; then
+            log "$dev ready after attempt $attempt: ${VALID_FRAMES} frames, ${size} bytes"
+            rm -f "$OUT"
+            return 0
+        fi
+
+        log "$dev validation failed on attempt $attempt: rc=$rc size=$size expected=$EXPECT"
+        rm -f "$OUT"
+        sleep 2
+    done
+    return 1
+}
+
 wait_dev=0
 if [ "$DEV_ARG" = "auto" ] || [ -z "$DEV_ARG" ]; then
-    DEV=""
+    DEVS=""
     while [ "$wait_dev" -lt 30 ]; do
-        DEV="$(find_rs300_video || true)"
-        [ -n "$DEV" ] && break
+        DEVS="$(find_rs300_videos || true)"
+        [ -n "$DEVS" ] && break
         sleep 1
         wait_dev=$((wait_dev + 1))
     done
 
-    if [ -z "$DEV" ]; then
-        log "could not auto-detect rs300 video node"
+    if [ -z "$DEVS" ]; then
+        log "could not auto-detect any rs300 video nodes"
         exit 1
     fi
 else
-    DEV="$DEV_ARG"
-    while [ ! -e "$DEV" ] && [ "$wait_dev" -lt 30 ]; do
+    DEVS="$DEV_ARG"
+    while [ ! -e "$DEVS" ] && [ "$wait_dev" -lt 30 ]; do
         sleep 1
         wait_dev=$((wait_dev + 1))
     done
 
-    if [ ! -e "$DEV" ]; then
-        log "device $DEV did not appear"
+    if [ ! -e "$DEVS" ]; then
+        log "device $DEVS did not appear"
         exit 1
     fi
 fi
 
-log "using $DEV"
-
-for attempt in 1 2 3; do
-    log "attempt $attempt: validating $DEV"
-    rm -f "$OUT"
-
-    timeout 35s v4l2-ctl -d "$DEV" \
-        --set-fmt-video=width=${WIDTH},height=${HEIGHT},pixelformat=${PIX} \
-        --stream-mmap=4 --stream-count=${VALID_FRAMES} --stream-to="$OUT" >/dev/null 2>&1
-    rc=$?
-    size=0
-    [ -f "$OUT" ] && size=$(stat -c%s "$OUT" 2>/dev/null || echo 0)
-
-    if [ "$rc" -eq 0 ] && [ "$size" -eq "$EXPECT" ] && frame_has_signal; then
-        log "ready after attempt $attempt: ${VALID_FRAMES} frames, ${size} bytes"
-        rm -f "$OUT"
-        exit 0
+ready_count=0
+for dev in $DEVS; do
+    if validate_one_dev "$dev"; then
+        ready_count=$((ready_count + 1))
+    else
+        log "$dev not connected or did not validate"
     fi
-
-    log "validation failed on attempt $attempt: rc=$rc size=$size expected=$EXPECT or frame ${CHECK_FRAME} is blank"
-    rm -f "$OUT"
-    sleep 5
 done
 
-log "camera did not validate after 3 attempts"
+if [ "$ready_count" -gt 0 ]; then
+    log "${ready_count} RS300 camera(s) validated and ready"
+    exit 0
+fi
+
+log "no RS300 cameras validated"
 exit 1
 EOF
     chmod 0755 "$VALIDATE_SCRIPT"
 
     cat >"$LOAD_SERVICE" <<EOF
 [Unit]
-Description=Load and validate RS300/WN2640 CAM1 thermal camera (640x512)
+Description=Load and validate RS300/WN2640 CAM0/CAM1 thermal cameras (640x512)
 After=systemd-udev-settle.service
 
 [Service]

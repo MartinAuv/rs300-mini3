@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
+import glob
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import cv2
 import numpy as np
 
-DEVICE = os.environ.get("RS300_DEVICE", "/dev/video0")
 WIDTH = 640
 HEIGHT = 512
 FPS = 60
 DEST_IP = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("DEST_IP", "192.168.103.166")
 DEST_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else int(os.environ.get("DEST_PORT", "5000"))
+STREAM_LAYOUT = os.environ.get("STREAM_LAYOUT", "separate")  # "separate" or "sbs"
 PIXEL_FORMAT = "UYVY"
 CODEC = "H264"
 
@@ -55,7 +57,7 @@ def gst_has_element(element: str) -> bool:
     return res.returncode == 0
 
 
-def open_stream_writer(dest_ip: str, dest_port: int):
+def open_stream_writer(dest_ip: str, dest_port: int, width: int = WIDTH, height: int = HEIGHT):
     has_nvenc = gst_has_element("nvv4l2h264enc") and gst_has_element("nvvidconv")
 
     # 1. Try OpenCV VideoWriter with hardware encoding (nvv4l2h264enc) if available
@@ -65,7 +67,7 @@ def open_stream_writer(dest_ip: str, dest_port: int):
             f"nvvidconv ! nvv4l2h264enc bitrate=4000000 ! h264parse ! "
             f"rtph264pay config-interval=1 pt=96 ! udpsink host={dest_ip} port={dest_port} sync=false async=false"
         )
-        writer = cv2.VideoWriter(gst_out_hw, cv2.CAP_GSTREAMER, 0, FPS, (WIDTH, HEIGHT), False)
+        writer = cv2.VideoWriter(gst_out_hw, cv2.CAP_GSTREAMER, 0, FPS, (width, height), False)
         if writer.isOpened():
             return writer, "Hardware-Encoding via nvv4l2h264enc (OpenCV GStreamer)"
 
@@ -76,7 +78,7 @@ def open_stream_writer(dest_ip: str, dest_port: int):
             "x264enc tune=zerolatency speed-preset=ultrafast bitrate=4000 key-int-max=30 ! h264parse ! "
             f"rtph264pay config-interval=1 pt=96 ! udpsink host={dest_ip} port={dest_port} sync=false async=false"
         )
-        writer = cv2.VideoWriter(gst_out_sw, cv2.CAP_GSTREAMER, 0, FPS, (WIDTH, HEIGHT), False)
+        writer = cv2.VideoWriter(gst_out_sw, cv2.CAP_GSTREAMER, 0, FPS, (width, height), False)
         if writer.isOpened():
             return writer, "Software-Encoding via x264enc (OpenCV GStreamer)"
 
@@ -86,7 +88,7 @@ def open_stream_writer(dest_ip: str, dest_port: int):
         cmd = [
             "gst-launch-1.0", "-q",
             "fdsrc", "fd=0",
-            "!", "rawvideoparse", f"width={WIDTH}", f"height={HEIGHT}", "format=gray8", f"framerate={FPS}/1",
+            "!", "rawvideoparse", f"width={width}", f"height={height}", "format=gray8", f"framerate={FPS}/1",
             "!", "videoconvert",
             "!", "video/x-raw,format=I420",
             "!", "nvvidconv",
@@ -101,7 +103,7 @@ def open_stream_writer(dest_ip: str, dest_port: int):
         cmd = [
             "gst-launch-1.0", "-q",
             "fdsrc", "fd=0",
-            "!", "rawvideoparse", f"width={WIDTH}", f"height={HEIGHT}", "format=gray8", f"framerate={FPS}/1",
+            "!", "rawvideoparse", f"width={width}", f"height={height}", "format=gray8", f"framerate={FPS}/1",
             "!", "videoconvert",
             "!", "video/x-raw,format=I420",
             "!", "x264enc", "tune=zerolatency", "speed-preset=ultrafast", "bitrate=4000", "key-int-max=30",
@@ -115,7 +117,7 @@ def open_stream_writer(dest_ip: str, dest_port: int):
         cmd = [
             "gst-launch-1.0", "-q",
             "fdsrc", "fd=0",
-            "!", "rawvideoparse", f"width={WIDTH}", f"height={HEIGHT}", "format=gray8", f"framerate={FPS}/1",
+            "!", "rawvideoparse", f"width={width}", f"height={height}", "format=gray8", f"framerate={FPS}/1",
             "!", "videoconvert",
             "!", "video/x-raw,format=I420",
             "!", "openh264enc", "bitrate=4000000",
@@ -131,62 +133,158 @@ def open_stream_writer(dest_ip: str, dest_port: int):
     )
 
 
-def main() -> None:
-    cap = cv2.VideoCapture(DEVICE, cv2.CAP_V4L2)
+def open_camera(dev: str):
+    cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
     cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*PIXEL_FORMAT))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
-
     if not cap.isOpened():
-        raise RuntimeError(f"Kamera ({DEVICE}) konnte nicht geöffnet werden.")
+        cap.release()
+        return None
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        cap.release()
+        return None
+    return cap
 
-    out, encoder_info = open_stream_writer(DEST_IP, DEST_PORT)
 
-    print("=" * 60)
-    print("Thermal-Stream gestartet")
-    print(f"Quelle:        {DEVICE} (Format: {PIXEL_FORMAT}, {WIDTH}x{HEIGHT} @ {FPS}fps)")
-    print(f"Ziel:          udp://{DEST_IP}:{DEST_PORT}")
-    print(f"Codec:         {CODEC} ({encoder_info})")
-    print("Beenden mit:   Strg+C")
-    print("=" * 60)
+def discover_active_cameras() -> list[tuple[str, cv2.VideoCapture]]:
+    env_devs = os.environ.get("RS300_DEVICES", "").strip()
+    if env_devs:
+        candidates = env_devs.split()
+    elif os.environ.get("RS300_DEVICE"):
+        candidates = [os.environ["RS300_DEVICE"]]
+    else:
+        candidates = sorted(glob.glob("/dev/video*"))
 
-    alpha = 0.1
-    smoothed_min = None
-    smoothed_max = None
+    active = []
+    for dev in candidates:
+        cap = open_camera(dev)
+        if cap is not None:
+            active.append((dev, cap))
+    return active
 
+
+class ThermalNormalizer:
+    def __init__(self, alpha: float = 0.1):
+        self.alpha = alpha
+        self.smoothed_min = None
+        self.smoothed_max = None
+
+    def normalize(self, frame: np.ndarray) -> np.ndarray:
+        raw_16bit = np.ascontiguousarray(frame).reshape(-1).view(np.uint16).reshape((HEIGHT, WIDTH))
+        cur_min = float(raw_16bit.min())
+        cur_max = float(raw_16bit.max())
+
+        if self.smoothed_min is None:
+            self.smoothed_min, self.smoothed_max = cur_min, cur_max
+        else:
+            self.smoothed_min = self.alpha * cur_min + (1.0 - self.alpha) * self.smoothed_min
+            self.smoothed_max = self.alpha * cur_max + (1.0 - self.alpha) * self.smoothed_max
+
+        return np.clip(
+            (raw_16bit.astype(np.float32) - self.smoothed_min)
+            / max(self.smoothed_max - self.smoothed_min, 1.0)
+            * 255.0,
+            0,
+            255,
+        ).astype(np.uint8)
+
+
+def stream_single_camera(dev: str, cap: cv2.VideoCapture, dest_ip: str, dest_port: int, stop_event: threading.Event):
+    out, _ = open_stream_writer(dest_ip, dest_port, WIDTH, HEIGHT)
+    norm = ThermalNormalizer(alpha=0.1)
     try:
-        while True:
+        while not stop_event.is_set():
             ret, frame = cap.read()
             if not ret:
-                print("Stream abgebrochen.")
+                print(f"[{dev}] Stream abgebrochen.")
+                stop_event.set()
                 break
-
-            raw_16bit = np.ascontiguousarray(frame).reshape(-1).view(np.uint16).reshape((HEIGHT, WIDTH))
-
-            cur_min = float(raw_16bit.min())
-            cur_max = float(raw_16bit.max())
-
-            if smoothed_min is None:
-                smoothed_min, smoothed_max = cur_min, cur_max
-            else:
-                smoothed_min = alpha * cur_min + (1 - alpha) * smoothed_min
-                smoothed_max = alpha * cur_max + (1 - alpha) * smoothed_max
-
-            frame_8bit = np.clip(
-                (raw_16bit.astype(np.float32) - smoothed_min) / max(smoothed_max - smoothed_min, 1) * 255,
-                0, 255
-            ).astype(np.uint8)
-
-            out.write(frame_8bit)
-
-    except KeyboardInterrupt:
-        print("\nStream manuell beendet.")
-
+            out.write(norm.normalize(frame))
     finally:
         cap.release()
         out.release()
-        print("Kamera und Stream-Pipeline freigegeben.")
+
+
+def main() -> None:
+    active_cams = discover_active_cameras()
+    if not active_cams:
+        raise RuntimeError("Keine aktive RS300/WN2640 Kamera konnte geöffnet werden.")
+
+    stop_event = threading.Event()
+
+    # Side-by-side combined mode when 2 cameras are active and STREAM_LAYOUT=sbs
+    if len(active_cams) == 2 and STREAM_LAYOUT == "sbs":
+        (dev0, cap0), (dev1, cap1) = active_cams
+        out, encoder_info = open_stream_writer(DEST_IP, DEST_PORT, WIDTH * 2, HEIGHT)
+        norm0 = ThermalNormalizer(alpha=0.1)
+        norm1 = ThermalNormalizer(alpha=0.1)
+
+        print("=" * 65)
+        print("Dual Thermal-Stream gestartet (Side-by-Side 1280x512)")
+        print(f"Quellen:       {dev0} + {dev1} (Format: {PIXEL_FORMAT}, 2x {WIDTH}x{HEIGHT} @ {FPS}fps)")
+        print(f"Ziel:          udp://{DEST_IP}:{DEST_PORT}")
+        print(f"Codec:         {CODEC} ({encoder_info})")
+        print("Beenden mit:   Strg+C")
+        print("=" * 65)
+
+        try:
+            while True:
+                ret0, frame0 = cap0.read()
+                ret1, frame1 = cap1.read()
+                if not ret0 or not ret1:
+                    print("Stream abgebrochen.")
+                    break
+                combined = np.hstack((norm0.normalize(frame0), norm1.normalize(frame1)))
+                out.write(combined)
+        except KeyboardInterrupt:
+            print("\nStream manuell beendet.")
+        finally:
+            cap0.release()
+            cap1.release()
+            out.release()
+            print("Kameras und Stream-Pipeline freigegeben.")
+        return
+
+    # Single camera or parallel multi-port streaming (Cam 0 -> DEST_PORT, Cam 1 -> DEST_PORT + 1)
+    _, encoder_info = open_stream_writer(DEST_IP, DEST_PORT, WIDTH, HEIGHT)
+    _.release()
+
+    print("=" * 65)
+    if len(active_cams) == 1:
+        print("Thermal-Stream gestartet (1 Kamera)")
+    else:
+        print(f"Parallel Thermal-Stream gestartet ({len(active_cams)} Kameras)")
+    for idx, (dev, _) in enumerate(active_cams):
+        port = DEST_PORT + idx
+        print(f"Kamera {idx}:      {dev} ({WIDTH}x{HEIGHT} @ {FPS}fps) -> udp://{DEST_IP}:{port}")
+    print(f"Codec:         {CODEC} ({encoder_info})")
+    print("Beenden mit:   Strg+C")
+    print("=" * 65)
+
+    threads = []
+    for idx, (dev, cap) in enumerate(active_cams):
+        port = DEST_PORT + idx
+        t = threading.Thread(
+            target=stream_single_camera,
+            args=(dev, cap, DEST_IP, port, stop_event),
+            daemon=True,
+        )
+        t.start()
+        threads.append(t)
+
+    try:
+        while not stop_event.is_set():
+            stop_event.wait(timeout=0.5)
+    except KeyboardInterrupt:
+        print("\nStream manuell beendet.")
+        stop_event.set()
+    finally:
+        for t in threads:
+            t.join(timeout=3.0)
+        print("Kamera(s) und Stream-Pipeline(s) freigegeben.")
 
 
 if __name__ == "__main__":

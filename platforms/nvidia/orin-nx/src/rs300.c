@@ -362,6 +362,7 @@ struct rs300 {
 	const struct rs300_mode *mode;
 	struct rs300_mode runtime_mode;
 	struct camera_common_frmfmt runtime_frmfmt;
+	struct camera_common_sensor_ops sensor_ops;
 
 	/* Mode filtering - only advertise modes supported by physical hardware */
 	const struct rs300_mode *available_modes;  /* Pointer to single supported mode */
@@ -3610,9 +3611,10 @@ static int rs300_probe(struct i2c_client *client)
 	tc_dev->dev = dev;
 	strncpy(tc_dev->name, DRIVER_NAME, sizeof(tc_dev->name));
 	tc_dev->dev_regmap_config = &rs300_regmap_config;
-	rs300_common_ops.frmfmt_table = &rs300->runtime_frmfmt;
-	rs300_common_ops.numfrmfmts = 1;
-	tc_dev->sensor_ops = &rs300_common_ops;
+	rs300->sensor_ops = rs300_common_ops;
+	rs300->sensor_ops.frmfmt_table = &rs300->runtime_frmfmt;
+	rs300->sensor_ops.numfrmfmts = 1;
+	tc_dev->sensor_ops = &rs300->sensor_ops;
 	tc_dev->v4l2sd_internal_ops = NULL;
 	tc_dev->tcctrl_ops = NULL;
 
