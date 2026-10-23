@@ -41,6 +41,8 @@
 #define DRIVER_NAME "rs300"
 //80M (clk)* 2(double ) *2 (lan) /8
 
+#define RS300_WIDTH 640
+#define RS300_HEIGHT 512
 #define RS300_LINK_RATE (80 * 1000 * 1000)       /* 80MHz link rate matching device tree */
 #define RS300_PIXEL_RATE	(40 * 1000 * 1000)   /* 80 MHz D-PHY clock, 2 lanes, 8-bit bus */
 #define RS300_PIXEL_RATE_16BIT	(20 * 1000 * 1000)
@@ -111,8 +113,8 @@ static const char * const output_mode_menu[] = {
 
 #define NUM_COLORMAP_ITEMS (ARRAY_SIZE(colormap_menu) - 1) // Account for NULL terminator
 
-/* Physical Mini2/WN2 modules have a fixed resolution; select it at load time. */
-static int mode = 0; // 0-640; 1-256; 2-384
+/* Fixed 640x512 resolution for UVD640 / Mini2 / Mini3 / WN2640 modules. */
+static int mode = 640;
 static int fps = 60;
 static int set_fps_cmd = 1;
 static int type = 16;
@@ -120,10 +122,6 @@ static int output_source = -1;
 static int yuv_order = 2;
 static int start_path = 1;
 static int start_dst = 1;
-static int start_width = 0;
-static int start_height = 0;
-static int advertise_width = 0;
-static int advertise_height = 0;
 static int probe_prime_ms = 0;
 static int probe_prime_delay_ms = 0;
 static int probe_prime_stop_ms = 300;
@@ -142,10 +140,6 @@ module_param(output_source, int, 0644);
 module_param(yuv_order, int, 0644);
 module_param(start_path, int, 0644);
 module_param(start_dst, int, 0644);
-module_param(start_width, int, 0644);
-module_param(start_height, int, 0644);
-module_param(advertise_width, int, 0644);
-module_param(advertise_height, int, 0644);
 module_param(probe_prime_ms, int, 0644);
 module_param(probe_prime_delay_ms, int, 0644);
 module_param(probe_prime_stop_ms, int, 0644);
@@ -156,7 +150,7 @@ module_param(power_on_delay_ms, int, 0644);
 module_param(auto_shutter, int, 0644);
 module_param(startup_ffc, int, 0644);
 module_param(native_y16, int, 0644);
-MODULE_PARM_DESC(mode, "Sensor mode index: 0=640x512, 1=256x192, 2=384x288");
+MODULE_PARM_DESC(mode, "Sensor resolution compatibility parameter (fixed to 640x512)");
 MODULE_PARM_DESC(fps, "Frame rate sent to the RS300 start packet");
 MODULE_PARM_DESC(set_fps_cmd, "Send the separate RS300 FPS command before START");
 MODULE_PARM_DESC(type, "RS300 start-packet source/type byte");
@@ -164,10 +158,6 @@ MODULE_PARM_DESC(output_source, "RS300 output-source command value: -1=skip, 0..
 MODULE_PARM_DESC(yuv_order, "RS300 YUV order command: -1=skip, 0=UYVY, 1=VYUY, 2=YUYV, 3=YVYU");
 MODULE_PARM_DESC(start_path, "RS300 start-packet path byte");
 MODULE_PARM_DESC(start_dst, "RS300 start-packet destination byte");
-MODULE_PARM_DESC(start_width, "Optional RS300 start-packet width override; 0 uses current mode width");
-MODULE_PARM_DESC(start_height, "Optional RS300 start-packet height override; 0 uses current mode height");
-MODULE_PARM_DESC(advertise_width, "Optional V4L2/Tegra advertised width override; 0 uses selected sensor mode width");
-MODULE_PARM_DESC(advertise_height, "Optional V4L2/Tegra advertised height override; 0 uses selected sensor mode height");
 MODULE_PARM_DESC(probe_prime_ms, "Start camera for this many ms during probe, then stop; 0 disables");
 MODULE_PARM_DESC(probe_prime_delay_ms, "Delay before probe-time camera prime");
 MODULE_PARM_DESC(probe_prime_stop_ms, "Delay after probe-time STOP command");
@@ -670,61 +660,33 @@ static int write_regs(struct i2c_client *client,  u32 reg, u8 *val,int len)
 
 /* Duplicate struct definitions removed - now defined earlier in file */
 
-static struct rs300_mode supported_modes[] = {
-    { /* 640 - Primary mode for Pi 5 */
-        .width      = 640,
-        .height     = 512,
-        .max_fps = {
-            .numerator = 60,
-            .denominator = 1,
-        },
-        .code = RS300_DEFAULT_MBUS_CODE,
-    },
+static const struct rs300_mode supported_modes[] = {
     {
-        .width      = 256,
-        .height     = 192,
-        .max_fps = {
-            .numerator = 25,
-            .denominator = 1,
-        },
-        .code = RS300_DEFAULT_MBUS_CODE,
-    },
-        { /* 384*/
-        .width      = 384,
-        .height     = 288,
+        .width      = RS300_WIDTH,
+        .height     = RS300_HEIGHT,
         .max_fps = {
             .numerator = 60,
             .denominator = 1,
         },
         .code = RS300_DEFAULT_MBUS_CODE,
-    }
-
+    },
 };
 
 static const struct rs300_mode *rs300_apply_runtime_mode(struct rs300 *rs300)
 {
     struct device *dev = rs300->s_data && rs300->s_data->dev ?
                          rs300->s_data->dev : &rs300->client->dev;
-    int idx = mode;
 
-    if (idx < 0 || idx >= ARRAY_SIZE(supported_modes)) {
-        dev_warn(dev, "Invalid mode=%d, falling back to mode=0", idx);
-        idx = 0;
-    }
+    if (mode != 0 && mode != RS300_WIDTH)
+        dev_warn(dev, "Unsupported mode=%d ignored; using fixed %ux%u mode",
+                 mode, RS300_WIDTH, RS300_HEIGHT);
 
-    rs300->runtime_mode = supported_modes[idx];
-    if (advertise_width > 0)
-        rs300->runtime_mode.width = advertise_width;
-    if (advertise_height > 0)
-        rs300->runtime_mode.height = advertise_height;
-
+    rs300->runtime_mode = supported_modes[0];
     rs300->mode = &rs300->runtime_mode;
     rs300->available_modes = &rs300->runtime_mode;
     rs300->num_modes = 1;
 
-    dev_info(dev,
-             "Mode filtering: selected mode=%d sensor=%ux%u advertised=%ux%u",
-             idx, supported_modes[idx].width, supported_modes[idx].height,
+    dev_info(dev, "Configured sensor mode: %ux%u",
              rs300->runtime_mode.width, rs300->runtime_mode.height);
 
     return rs300->mode;
@@ -749,8 +711,8 @@ static const int rs300_60fps[] = {
 static const struct camera_common_frmfmt rs300_frmfmt[] = {
 	{
 		.size = {
-			.width = 384,
-			.height = 288,
+			.width = RS300_WIDTH,
+			.height = RS300_HEIGHT,
 		},
 		.framerates = rs300_60fps,
 		.num_framerates = ARRAY_SIZE(rs300_60fps),
@@ -1421,31 +1383,28 @@ static int rs300_get_autoshutter(struct rs300 *rs300, int *value)
     struct i2c_client *client = v4l2_get_subdevdata(&rs300->sd);
     u8 params[12] = {0};
     u8 result_buffer[18];
+    struct rs300_command cmd = {
+        .class = 0x10,
+        .module = 0x02,
+        .subcmd = 0x81,
+        .params = params,
+        .param_len = 9,
+        .result = result_buffer,
+        .result_len = sizeof(result_buffer),
+        .timeout_ms = 500,
+        .name = "GET autoshutter",
+    };
     int ret;
 
     dev_dbg(&client->dev, "Getting autoshutter state");
 
-    /* Pack parameters: P9=0x01, Len=0x0001 */
-    params[8] = 0x01;  /* P9 = 0x01 */
-    /* Len field is in bytes 12-13, but rs300_send_command handles this */
+    params[8] = 0x01;
 
-    /* Command: Class=0x10, Module=0x02, SubCmd=0x81 */
-    ret = rs300_send_command(rs300, 0x10, 0x02, 0x81, params, 9, 500);
-    if (ret < 0) {
-        dev_err(&client->dev, "Failed to get autoshutter state: %d", ret);
+    ret = rs300_exec_command(rs300, &cmd);
+    if (ret < 0)
         return ret;
-    }
 
-    /* Read result from camera (register 0x1d00 contains the result) */
-    ret = read_regs(client, 0x1d00, result_buffer, 18);
-    if (ret < 0) {
-        dev_err(&client->dev, "Failed to read autoshutter result: %d", ret);
-        return ret;
-    }
-
-    /* Extract result from buffer (P1 contains the state) */
-    *value = result_buffer[4];  /* P1 is at byte 4 */
-
+    *value = result_buffer[4];
     dev_dbg(&client->dev, "Autoshutter state: %s", *value ? "ON" : "OFF");
 
     return 0;
@@ -1817,7 +1776,20 @@ static void rs300_update_image_pad_format(struct rs300 *rs300,
 	rs300_reset_colorspace(&fmt->format);
 }
 
-// Restore and fix __rs300_get_pad_fmt
+static struct v4l2_mbus_framefmt *
+rs300_get_try_fmt(struct v4l2_subdev *sd,
+		  struct v4l2_subdev_state *sd_state,
+		  unsigned int pad)
+{
+	if (!sd_state)
+		return NULL;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+	return v4l2_subdev_state_get_format(sd_state, pad);
+#else
+	return v4l2_subdev_get_try_format(sd, sd_state, pad);
+#endif
+}
+
 static int __rs300_get_pad_fmt(struct rs300 *rs300,
                                struct v4l2_subdev_state *sd_state,
                                struct v4l2_subdev_format *fmt)
@@ -1831,8 +1803,7 @@ static int __rs300_get_pad_fmt(struct rs300 *rs300,
                 fmt->pad, fmt->which);
 
         if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
-                try_fmt = v4l2_subdev_get_try_format(&rs300->sd,
-                                                      sd_state, fmt->pad);
+                try_fmt = rs300_get_try_fmt(&rs300->sd, sd_state, fmt->pad);
                 if (!try_fmt)
                         return -EINVAL;
 
@@ -1843,8 +1814,8 @@ static int __rs300_get_pad_fmt(struct rs300 *rs300,
 			if (!fmt->format.code)
 				fmt->format.code = RS300_DEFAULT_MBUS_CODE;
 			if (!fmt->format.width || !fmt->format.height) {
-				fmt->format.width = supported_modes[mode].width;
-				fmt->format.height = supported_modes[mode].height;
+				fmt->format.width = RS300_WIDTH;
+				fmt->format.height = RS300_HEIGHT;
 			}
 			fmt->format.field = V4L2_FIELD_NONE;
 			rs300_reset_colorspace(&fmt->format);
@@ -1859,8 +1830,8 @@ static int __rs300_get_pad_fmt(struct rs300 *rs300,
 			if (!fmt->format.code)
 				fmt->format.code = RS300_DEFAULT_MBUS_CODE;
 			if (!fmt->format.width || !fmt->format.height) {
-				fmt->format.width = supported_modes[mode].width;
-				fmt->format.height = supported_modes[mode].height;
+				fmt->format.width = RS300_WIDTH;
+				fmt->format.height = RS300_HEIGHT;
 			}
 			fmt->format.field = V4L2_FIELD_NONE;
 			rs300_reset_colorspace(&fmt->format);
@@ -1955,8 +1926,7 @@ static int rs300_set_pad_fmt(struct v4l2_subdev *sd,
 		rs300_update_image_pad_format(rs300, mode, fmt);
 
                 if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
-                        framefmt = v4l2_subdev_get_try_format(sd, sd_state,
-                                                               fmt->pad);
+                        framefmt = rs300_get_try_fmt(sd, sd_state, fmt->pad);
                         if (!framefmt) {
                                 mutex_unlock(&rs300->mutex);
                                 return -EINVAL;
@@ -2044,8 +2014,8 @@ static void rs300_build_start_packet(struct rs300 *rs300,
 
     memcpy(start_regs, start_template, sizeof(start_template));
 
-    *packet_width = start_width > 0 ? start_width : rs300->mode->width;
-    *packet_height = start_height > 0 ? start_height : rs300->mode->height;
+    *packet_width = rs300->mode ? rs300->mode->width : RS300_WIDTH;
+    *packet_height = rs300->mode ? rs300->mode->height : RS300_HEIGHT;
 
     start_regs[18] = start_path & 0xff;
     start_regs[19] = type & 0xff;
@@ -2068,6 +2038,9 @@ static void rs300_build_start_packet(struct rs300 *rs300,
 static void rs300_stop_streaming(struct rs300 *rs300)
 {
     struct i2c_client *client = v4l2_get_subdevdata(&rs300->sd);
+    unsigned int packet_width = rs300->mode ? rs300->mode->width : RS300_WIDTH;
+    unsigned int packet_height = rs300->mode ? rs300->mode->height : RS300_HEIGHT;
+    unsigned short crcdata;
 
     /* Keep the stop packet local to the current stream operation. */
     u8 stop_regs[28] = {
@@ -2075,16 +2048,33 @@ static void rs300_stop_streaming(struct rs300 *rs300)
         0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00,
         0x0a, 0x00,
-        0x00, 0x00, //crc [14]
-        0x2F, 0x0D, //crc [16]
-        0x01, //path [18]
-        0x16, //src [19]
-        0x00, //dst [20]
-        0x3c, //fps [21]
-        0x80, 0x02, //width&0xff, width>>8 [22-23]
-        0x00, 0x02, //height&0xff, height>>8 [24-25]
+        0x00, 0x00,
+        0x00, 0x00,
+        0x01,
+        0x16,
+        0x00,
+        0x3c,
+        0x80, 0x02,
+        0x00, 0x02,
         0x00, 0x00
     };
+
+    stop_regs[18] = start_path & 0xff;
+    stop_regs[19] = type & 0xff;
+    stop_regs[20] = 0x00;
+    stop_regs[21] = fps & 0xff;
+    stop_regs[22] = packet_width & 0xff;
+    stop_regs[23] = (packet_width >> 8) & 0xff;
+    stop_regs[24] = packet_height & 0xff;
+    stop_regs[25] = (packet_height >> 8) & 0xff;
+
+    crcdata = do_crc((uint8_t *)(stop_regs + 18), 10);
+    stop_regs[14] = crcdata & 0xff;
+    stop_regs[15] = crcdata >> 8;
+
+    crcdata = do_crc((uint8_t *)stop_regs, 16);
+    stop_regs[16] = crcdata & 0xff;
+    stop_regs[17] = crcdata >> 8;
 
     dev_dbg(&client->dev, "Stopping streaming");
 
@@ -2546,9 +2536,6 @@ static int rs300_set_stream(struct v4l2_subdev *sd, int enable)
     return rs300_set_stream_state(to_rs300(sd), enable);
 }
 
-static const s64 link_freq_menu_items[] = {
-	RS300_LINK_RATE,//80m
-};
 /* -----------------------------------------------------------------------------
  * V4L2 subdev internal operations
  */
@@ -3672,17 +3659,29 @@ error_mutex_destroy:
 	return ret;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+static void rs300_remove(struct i2c_client *client)
+#else
 static int rs300_remove(struct i2c_client *client)
+#endif
 {
 	struct camera_common_data *s_data = to_camera_common_data(&client->dev);
 	struct rs300 *rs300;
 
 	if (!s_data)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+		return;
+#else
 		return -EINVAL;
+#endif
 
 	rs300 = s_data->priv;
 	if (!rs300)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+		return;
+#else
 		return -EINVAL;
+#endif
 
 	tegracam_v4l2subdev_unregister(rs300->tc_dev);
 	tegracam_device_unregister(rs300->tc_dev);
@@ -3691,7 +3690,9 @@ static int rs300_remove(struct i2c_client *client)
 	mutex_destroy(&rs300->mutex);
 	dev_info(&client->dev, "RS300 driver removed\n");
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
 	return 0;
+#endif
 }
 
 static const struct i2c_device_id rs300_id[] = {
@@ -3714,7 +3715,11 @@ static struct i2c_driver rs300_i2c_driver = {
 		.name	= DRIVER_NAME,
 		.of_match_table = of_match_ptr(rs300_of_match),
 	},
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+	.probe		= rs300_probe,
+#else
 	.probe_new	= rs300_probe,
+#endif
 	.remove		= rs300_remove,
 	.id_table	= rs300_id,
 };

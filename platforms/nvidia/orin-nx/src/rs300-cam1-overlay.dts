@@ -1,129 +1,518 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Self-contained Device Tree Overlay for RS300 / WN2640 / Mini2 / Mini3 (640x512)
+ * on Auvidea JNX120 / JNX120X carrier board (CSI port CAM1 / serial_c / i2c@1).
+ *
+ * Compatible with both:
+ *  - JetPack 7.2+ (L4T R39.2+, kernel 6.8.12-tegra) where the base DTB
+ *    (tegra234-auvidea-jnx42+p3767-0000-nv.dtb) does not pre-populate
+ *    cam_i2cmux, nvcsi channels, or tegra-camera-platform unless an overlay
+ *    is applied.
+ *  - JetPack 6.x (L4T R36.x, kernel 5.15-tegra) where the base DTB
+ *    (tegra234-auvidea-jnx120+p3767-0000-nv.dtb) pre-populates the 2x IMX219
+ *    camera graph.
+ *
+ * Only references base DTB symbols (&gpio, &gpio_aon, &cam_i2c) that exist in
+ * all Tegra234 base DTBs, and uses plain numeric GPIO bindings so it builds
+ * directly with `dtc -@` without C preprocessor includes:
+ *  - CAM0_PWDN   = TEGRA234_MAIN_GPIO(H, 6)  = 62
+ *  - CAM1_PWDN   = TEGRA234_MAIN_GPIO(AC, 0) = 160
+ *  - CAM_I2C_MUX = TEGRA234_AON_GPIO(CC, 3)  = 19
+ *  - GPIO_ACTIVE_HIGH = 0
+ */
 /dts-v1/;
 /plugin/;
 
 / {
-	fragment@0 {
-		target-path = "/bus@0/cam_i2cmux/i2c@1";
+	overlay-name = "RS300 Thermal Camera CAM1 (640x512)";
+
+	fragment-rs300-cam1@0 {
+		target-path = "/";
 		__overlay__ {
-			status = "okay";
-			#address-cells = <1>;
-			#size-cells = <0>;
-
-			rs300_cam1: rs300@3c {
-				status = "okay";
-				compatible = "mini2,rs300", "infisense,rs300";
-				reg = <0x3c>;
-				devnode = "video1";
-				physical_w = "3.680";
-				physical_h = "2.760";
-				sensor_model = "rs300";
-				use_sensor_mode_id = "true";
-					/*
-					 * Auvidea JNX CAM1_PW_DN / PAC.00.
-					 * libgpiod shows this as gpiochip0 line 138, but the
-					 * Tegra234 DT binding uses TEGRA234_MAIN_GPIO(AC, 0):
-					 * (20 * 8) + 0 = 160. Keep the raw binding value so this
-					 * overlay builds with plain dtc.
-					 */
-					power-gpios = <&gpio 160 0>;
-
-				mode0 {
-					mclk_khz = "24000";
-					num_lanes = "2";
-					tegra_sinterface = "serial_c";
-					phy_mode = "DPHY";
-					discontinuous_clk = "yes";
-					dpcm_enable = "false";
-					cil_settletime = "0";
-					active_w = "640";
-					active_h = "512";
-					mode_type = "yuv";
-					pixel_t = "yuv_uyvy16";
-					pixel_phase = "uyvy";
-					csi_pixel_bit_depth = "8";
-					readout_orientation = "0";
-					line_length = "640";
-					inherent_gain = "1";
-					mclk_multiplier = "1";
-					pix_clk_hz = "40000000";
-					gain_factor = "1";
-					framerate_factor = "1000000";
-					exposure_factor = "1000000";
-					min_gain_val = "1";
-					max_gain_val = "1";
-					step_gain_val = "1";
-					default_gain = "1";
-					min_hdr_ratio = "1";
-					max_hdr_ratio = "1";
-					min_framerate = "30000000";
-					max_framerate = "60000000";
-					step_framerate = "1";
-					default_framerate = "30000000";
-					min_exp_time = "1";
-					max_exp_time = "16666";
-					step_exp_time = "1";
-					default_exp_time = "16666";
-					embedded_metadata_height = "0";
-				};
-
+			tegra-capture-vi {
+				num-channels = <2>;
 				ports {
 					#address-cells = <1>;
 					#size-cells = <0>;
-
-					port@0 {
+					vi_port0: port@0 {
 						reg = <0>;
-
-						rs300_cam1_out: endpoint {
-							status = "okay";
+						rbpcv2_imx219_vi_in0: endpoint {
+							port-index = <0>;
+							bus-width = <2>;
+							remote-endpoint = <&rbpcv2_imx219_csi_out0>;
+						};
+					};
+					vi_port1: port@1 {
+						reg = <1>;
+						rbpcv2_imx219_vi_in1: endpoint {
 							port-index = <2>;
 							bus-width = <2>;
-							bus-type = <4>;
-							data-lanes = <1 2>;
-							clock-noncontinuous;
-							link-frequencies = /bits/ 64 <80000000>;
-							remote-endpoint = <&rbpcv2_imx219_csi_in1>;
+							remote-endpoint = <&rbpcv2_imx219_csi_out1>;
 						};
 					};
 				};
 			};
-		};
-	};
 
-	fragment@1 {
-		target = <&rbpcv2_imx219_csi_in1>;
-		__overlay__ {
-			port-index = <2>;
-			bus-width = <2>;
-			remote-endpoint = <&rs300_cam1_out>;
-		};
-	};
+			bus@0 {
+				/*
+				 * Ensure Auvidea JNX120 / JNX120X carrier GPIO hogs (Gigabit
+				 * Ethernet switch reset, USB2 hub reset, VBUS detect/enable)
+				 * remain active even when merged onto the shared JetPack 7.2
+				 * tegra234-auvidea-jnx42+p3767-0000-nv.dtb base DTB.
+				 */
+				gpio@2200000 {
+					usb2-hub-reset-high {
+						status = "okay";
+						gpio-hog;
+						/delete-property/ output-high;
+						output-low;
+						gpios = <0x84 0x00>;
+						label = "usb2-hub-reset";
+					};
 
-	fragment@2 {
-		target = <&cam_module1>;
-		__overlay__ {
-			status = "okay";
-			badge = "rs300_cam1";
-			position = "rear";
-			orientation = "1";
+					usb_vbus_det {
+						status = "okay";
+						gpio-hog;
+						output-low;
+						gpios = <0x99 0x01>;
+						label = "usb2-vbus-detect";
+					};
+				};
 
-			drivernode0 {
-				pcl_id = "v4l2_sensor";
-				sysfs-device-tree = "/sys/firmware/devicetree/base/bus@0/cam_i2cmux/i2c@1/rs300@3c";
+				gpio@c2f0000 {
+					gbe-switch-rst {
+						status = "okay";
+						gpio-hog;
+						output-high;
+						gpios = <0x12 0x00>;
+						label = "gbe-switch-rst";
+					};
+
+					vbus_en_gpio {
+						status = "okay";
+						output-low;
+						gpios = <0x10 0x00>;
+						label = "vbus_en_gpio";
+					};
+				};
+
+				host1x@13e00000 {
+					nvcsi@15a00000 {
+						num-channels = <2>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+						csi_chan0: channel@0 {
+							reg = <0>;
+							ports {
+								#address-cells = <1>;
+								#size-cells = <0>;
+								csi_chan0_port0: port@0 {
+									reg = <0>;
+									rbpcv2_imx219_csi_in0: endpoint@0 {
+										port-index = <0>;
+										bus-width = <2>;
+										remote-endpoint = <&rbpcv2_imx219_out0>;
+									};
+								};
+								csi_chan0_port1: port@1 {
+									reg = <1>;
+									rbpcv2_imx219_csi_out0: endpoint@1 {
+										remote-endpoint = <&rbpcv2_imx219_vi_in0>;
+									};
+								};
+							};
+						};
+						csi_chan1: channel@1 {
+							reg = <1>;
+							ports {
+								#address-cells = <1>;
+								#size-cells = <0>;
+								csi_chan1_port0: port@0 {
+									reg = <0>;
+									rbpcv2_imx219_csi_in1: endpoint@2 {
+										port-index = <2>;
+										bus-width = <2>;
+										remote-endpoint = <&rs300_cam1_out>;
+									};
+								};
+								csi_chan1_port1: port@1 {
+									reg = <1>;
+									rbpcv2_imx219_csi_out1: endpoint@3 {
+										remote-endpoint = <&rbpcv2_imx219_vi_in1>;
+									};
+								};
+							};
+						};
+					};
+				};
+
+				cam_i2cmux {
+					status = "okay";
+					compatible = "i2c-mux-gpio";
+					#address-cells = <1>;
+					#size-cells = <0>;
+					i2c-parent = <&cam_i2c>;
+					mux-gpios = <&gpio_aon 19 0>;
+
+					i2c_0: i2c@0 {
+						status = "okay";
+						reg = <0>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+
+						imx219_cam0: rbpcv2_imx219_a@10 {
+							compatible = "sony,imx219";
+							reg = <0x10>;
+							devnode = "video0";
+							physical_w = "3.680";
+							physical_h = "2.760";
+							sensor_model = "imx219";
+							use_sensor_mode_id = "true";
+							reset-gpios = <&gpio 62 0>;
+
+							mode0 {
+								mclk_khz = "24000";
+								num_lanes = "2";
+								tegra_sinterface = "serial_a";
+								lane_polarity = "6";
+								phy_mode = "DPHY";
+								discontinuous_clk = "yes";
+								dpcm_enable = "false";
+								cil_settletime = "0";
+								active_w = "3280";
+								active_h = "2464";
+								mode_type = "bayer";
+								pixel_phase = "rggb";
+								csi_pixel_bit_depth = "10";
+								readout_orientation = "90";
+								line_length = "3448";
+								inherent_gain = "1";
+								mclk_multiplier = "9.33";
+								pix_clk_hz = "182400000";
+								gain_factor = "16";
+								framerate_factor = "1000000";
+								exposure_factor = "1000000";
+								min_gain_val = "16";
+								max_gain_val = "170";
+								step_gain_val = "1";
+								default_gain = "16";
+								min_hdr_ratio = "1";
+								max_hdr_ratio = "1";
+								min_framerate = "2000000";
+								max_framerate = "21000000";
+								step_framerate = "1";
+								default_framerate = "21000000";
+								min_exp_time = "13";
+								max_exp_time = "683709";
+								step_exp_time = "1";
+								default_exp_time = "2495";
+								embedded_metadata_height = "2";
+							};
+							mode1 {
+								mclk_khz = "24000";
+								num_lanes = "2";
+								tegra_sinterface = "serial_a";
+								lane_polarity = "6";
+								phy_mode = "DPHY";
+								discontinuous_clk = "yes";
+								dpcm_enable = "false";
+								cil_settletime = "0";
+								active_w = "3280";
+								active_h = "1848";
+								mode_type = "bayer";
+								pixel_phase = "rggb";
+								csi_pixel_bit_depth = "10";
+								readout_orientation = "90";
+								line_length = "3448";
+								inherent_gain = "1";
+								mclk_multiplier = "9.33";
+								pix_clk_hz = "182400000";
+								gain_factor = "16";
+								framerate_factor = "1000000";
+								exposure_factor = "1000000";
+								min_gain_val = "16";
+								max_gain_val = "170";
+								step_gain_val = "1";
+								default_gain = "16";
+								min_hdr_ratio = "1";
+								max_hdr_ratio = "1";
+								min_framerate = "2000000";
+								max_framerate = "28000000";
+								step_framerate = "1";
+								default_framerate = "28000000";
+								min_exp_time = "13";
+								max_exp_time = "683709";
+								step_exp_time = "1";
+								default_exp_time = "2495";
+								embedded_metadata_height = "2";
+							};
+							mode2 {
+								mclk_khz = "24000";
+								num_lanes = "2";
+								tegra_sinterface = "serial_a";
+								lane_polarity = "6";
+								phy_mode = "DPHY";
+								discontinuous_clk = "yes";
+								dpcm_enable = "false";
+								cil_settletime = "0";
+								active_w = "1920";
+								active_h = "1080";
+								mode_type = "bayer";
+								pixel_phase = "rggb";
+								csi_pixel_bit_depth = "10";
+								readout_orientation = "90";
+								line_length = "3448";
+								inherent_gain = "1";
+								mclk_multiplier = "9.33";
+								pix_clk_hz = "182400000";
+								gain_factor = "16";
+								framerate_factor = "1000000";
+								exposure_factor = "1000000";
+								min_gain_val = "16";
+								max_gain_val = "170";
+								step_gain_val = "1";
+								default_gain = "16";
+								min_hdr_ratio = "1";
+								max_hdr_ratio = "1";
+								min_framerate = "2000000";
+								max_framerate = "30000000";
+								step_framerate = "1";
+								default_framerate = "30000000";
+								min_exp_time = "13";
+								max_exp_time = "683709";
+								step_exp_time = "1";
+								default_exp_time = "2495";
+								embedded_metadata_height = "2";
+							};
+							mode3 {
+								mclk_khz = "24000";
+								num_lanes = "2";
+								tegra_sinterface = "serial_a";
+								lane_polarity = "6";
+								phy_mode = "DPHY";
+								discontinuous_clk = "yes";
+								dpcm_enable = "false";
+								cil_settletime = "0";
+								active_w = "1640";
+								active_h = "1232";
+								mode_type = "bayer";
+								pixel_phase = "rggb";
+								csi_pixel_bit_depth = "10";
+								readout_orientation = "90";
+								line_length = "3448";
+								inherent_gain = "1";
+								mclk_multiplier = "9.33";
+								pix_clk_hz = "182400000";
+								gain_factor = "16";
+								framerate_factor = "1000000";
+								exposure_factor = "1000000";
+								min_gain_val = "16";
+								max_gain_val = "170";
+								step_gain_val = "1";
+								default_gain = "16";
+								min_hdr_ratio = "1";
+								max_hdr_ratio = "1";
+								min_framerate = "2000000";
+								max_framerate = "30000000";
+								step_framerate = "1";
+								default_framerate = "30000000";
+								min_exp_time = "13";
+								max_exp_time = "683709";
+								step_exp_time = "1";
+								default_exp_time = "2495";
+								embedded_metadata_height = "2";
+							};
+							mode4 {
+								mclk_khz = "24000";
+								num_lanes = "2";
+								tegra_sinterface = "serial_a";
+								lane_polarity = "6";
+								phy_mode = "DPHY";
+								discontinuous_clk = "yes";
+								dpcm_enable = "false";
+								cil_settletime = "0";
+								active_w = "1280";
+								active_h = "720";
+								mode_type = "bayer";
+								pixel_phase = "rggb";
+								csi_pixel_bit_depth = "10";
+								readout_orientation = "90";
+								line_length = "3448";
+								inherent_gain = "1";
+								mclk_multiplier = "9.33";
+								pix_clk_hz = "182400000";
+								gain_factor = "16";
+								framerate_factor = "1000000";
+								exposure_factor = "1000000";
+								min_gain_val = "16";
+								max_gain_val = "170";
+								step_gain_val = "1";
+								default_gain = "16";
+								min_hdr_ratio = "1";
+								max_hdr_ratio = "1";
+								min_framerate = "2000000";
+								max_framerate = "60000000";
+								step_framerate = "1";
+								default_framerate = "60000000";
+								min_exp_time = "13";
+								max_exp_time = "683709";
+								step_exp_time = "1";
+								default_exp_time = "2495";
+								embedded_metadata_height = "2";
+							};
+							ports {
+								#address-cells = <1>;
+								#size-cells = <0>;
+								port@0 {
+									reg = <0>;
+									rbpcv2_imx219_out0: endpoint {
+										status = "okay";
+										port-index = <0>;
+										bus-width = <2>;
+										remote-endpoint = <&rbpcv2_imx219_csi_in0>;
+									};
+								};
+							};
+						};
+					};
+
+					i2c_1: i2c@1 {
+						status = "okay";
+						reg = <1>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+
+						rbpcv2_imx219_c@10 {
+							reg = <0x10>;
+							status = "disabled";
+						};
+
+						rs300_cam1: rs300@3c {
+							status = "okay";
+							compatible = "mini2,rs300", "infisense,rs300";
+							reg = <0x3c>;
+							devnode = "video1";
+							physical_w = "3.680";
+							physical_h = "2.760";
+							sensor_model = "rs300";
+							use_sensor_mode_id = "true";
+							/*
+							 * Auvidea JNX CAM1_PW_DN / PAC.00:
+							 * TEGRA234_MAIN_GPIO(AC, 0) = (20 * 8) + 0 = 160.
+							 */
+							power-gpios = <&gpio 160 0>;
+
+							mode0 {
+								mclk_khz = "24000";
+								num_lanes = "2";
+								tegra_sinterface = "serial_c";
+								phy_mode = "DPHY";
+								discontinuous_clk = "yes";
+								dpcm_enable = "false";
+								cil_settletime = "0";
+								active_w = "640";
+								active_h = "512";
+								mode_type = "yuv";
+								pixel_t = "yuv_uyvy16";
+								pixel_phase = "uyvy";
+								csi_pixel_bit_depth = "8";
+								readout_orientation = "0";
+								line_length = "640";
+								inherent_gain = "1";
+								mclk_multiplier = "1";
+								pix_clk_hz = "40000000";
+								gain_factor = "1";
+								framerate_factor = "1000000";
+								exposure_factor = "1000000";
+								min_gain_val = "1";
+								max_gain_val = "1";
+								step_gain_val = "1";
+								default_gain = "1";
+								min_hdr_ratio = "1";
+								max_hdr_ratio = "1";
+								min_framerate = "30000000";
+								max_framerate = "60000000";
+								step_framerate = "1";
+								default_framerate = "30000000";
+								min_exp_time = "1";
+								max_exp_time = "16666";
+								step_exp_time = "1";
+								default_exp_time = "16666";
+								embedded_metadata_height = "0";
+							};
+
+							ports {
+								#address-cells = <1>;
+								#size-cells = <0>;
+
+								port@0 {
+									reg = <0>;
+
+									rs300_cam1_out: endpoint {
+										status = "okay";
+										port-index = <2>;
+										bus-width = <2>;
+										bus-type = <4>;
+										data-lanes = <1 2>;
+										clock-noncontinuous;
+										link-frequencies = /bits/ 64 <80000000>;
+										remote-endpoint = <&rbpcv2_imx219_csi_in1>;
+									};
+								};
+							};
+						};
+					};
+				};
+
+				lens_imx219@RBPCV2 {
+					min_focus_distance = "0.0";
+					hyper_focal = "0.0";
+					focal_length = "3.04";
+					f_number = "2.0";
+					aperture = "0.0";
+				};
 			};
 
-			drivernode1 {
-				status = "disabled";
-			};
-		};
-	};
+			tcp: tegra-camera-platform {
+				compatible = "nvidia, tegra-camera-platform";
+				num_csi_lanes = <4>;
+				max_lane_speed = <1500000>;
+				min_bits_per_pixel = <8>;
+				vi_peak_byte_per_pixel = <2>;
+				vi_bw_margin_pct = <25>;
+				max_pixel_rate = <40000000>;
+				isp_peak_byte_per_pixel = <5>;
+				isp_bw_margin_pct = <25>;
 
-	fragment@3 {
-		target = <&tcp>;
-		__overlay__ {
-			min_bits_per_pixel = <8>;
-			max_pixel_rate = <40000000>;
-			vi_peak_byte_per_pixel = <2>;
+				modules {
+					cam_module0: module0 {
+						badge = "jakku_front_RBP194";
+						position = "front";
+						orientation = "1";
+						cam_module0_drivernode0: drivernode0 {
+							pcl_id = "v4l2_sensor";
+							sysfs-device-tree = "/sys/firmware/devicetree/base/bus@0/cam_i2cmux/i2c@0/rbpcv2_imx219_a@10";
+						};
+						cam_module0_drivernode1: drivernode1 {
+							pcl_id = "v4l2_lens";
+							sysfs-device-tree = "/sys/firmware/devicetree/base/bus@0/lens_imx219@RBPCV2";
+						};
+					};
+					cam_module1: module1 {
+						status = "okay";
+						badge = "rs300_cam1";
+						position = "rear";
+						orientation = "1";
+						cam_module1_drivernode0: drivernode0 {
+							pcl_id = "v4l2_sensor";
+							sysfs-device-tree = "/sys/firmware/devicetree/base/bus@0/cam_i2cmux/i2c@1/rs300@3c";
+						};
+						cam_module1_drivernode1: drivernode1 {
+							status = "disabled";
+						};
+					};
+				};
+			};
 		};
 	};
 };

@@ -1,18 +1,20 @@
-# Mini2 / WN2 RS300/WN2640 Thermal Camera - NVIDIA Jetson Orin NX
+# Mini2 / Mini3 / UVD640 / RS300 / WN2640 Thermal Camera - NVIDIA Jetson Orin NX
 
-Status: tested on CAM1 with an Auvidea JNX Orin carrier, Jetson Linux
-`5.15.185-tegra`, I2C address `0x3c`, and a module identifying as
-`Camera WN2640`.
+Status: supported on CAM1 with an Auvidea JNX120 / JNX120X Orin NX carrier across:
+- **JetPack 7.2 / L4T R39.2** (`6.8.12-1021-tegra`, `/usr/src/nvidia/nvidia-public`, shared `tegra234-auvidea-jnx42+p3767-0000-nv.dtb` + UEFI overlays)
+- **JetPack 6.x / L4T R36.x** (`5.15.x-tegra`, `/usr/src/nvidia/nvidia-oot`, `tegra234-auvidea-jnx120+p3767-0000-nv.dtb`)
+
+I2C address `0x3c`, fixed `640x512` resolution.
 
 This is an imaging driver only. The stream is relative thermal image data, not
 radiometric temperature data.
 
 ## Hardware Path
 
-- Connector: CAM1 / CSI1 on the Auvidea JNX carrier
+- Connector: CAM1 / CSI1 on the Auvidea JNX120 / JNX120X carrier
 - I2C: `i2c-10`, mux channel 1, camera address `0x3c`
-- Video node: `/dev/video1`
-- Subdevice: usually `/dev/v4l-subdev2`
+- Video node: `/dev/video0` (when CAM0 is unpopulated) or `/dev/video1`
+- Subdevice: usually `/dev/v4l-subdev2` (or `/dev/v4l-subdev0`)
 - CSI: 2 lanes, 80 MHz link frequency
 - Fixed sensor mode: `640x512` at 60 fps
 - Tegra media bus format: `UYVY8_2X8`
@@ -29,12 +31,12 @@ transport and the video node still reports `UYVY`. For raw thermal processing,
 read the frame as 640x512 little-endian `uint16` instead of treating it as
 display YUV.
 
-## Install
+## Install (On the Jetson Orin NX)
 
-Build and install on the Jetson:
+Build and install directly on the Jetson:
 
 ```sh
-cd mini2-thermal-driver/platforms/nvidia/orin-nx
+cd rs300-mini3/platforms/nvidia/orin-nx
 sudo ./install.sh --set-default
 sudo reboot
 ```
@@ -169,7 +171,7 @@ after `Freeing pipeline ...` can take several seconds.
 Defaults in `/etc/modprobe.d/rs300.conf`:
 
 ```text
-mode=0 fps=60 set_fps_cmd=0 type=16 output_source=-1 yuv_order=2 start_path=1 start_dst=1 power_on_delay_ms=8000 auto_shutter=0 startup_ffc=0 native_y16=0
+mode=640 fps=60 set_fps_cmd=1 type=16 output_source=-1 yuv_order=2 start_path=1 start_dst=1 power_on_delay_ms=8000 auto_shutter=0 startup_ffc=0 native_y16=0
 ```
 
 Camera control defaults applied on stream start:
@@ -187,9 +189,9 @@ Useful parameters:
 
 | Parameter | Default | Meaning |
 |-|-|-|
-| `mode` | `0` | `0=640x512`, `1=256x192`, `2=384x288` |
-| `fps` | `60` | FPS byte in the START packet |
-| `set_fps_cmd` | `0` | Send separate FPS command before START |
+| `mode` | `640` | Fixed `640x512` resolution (compatibility parameter; accepts `640` or `0`) |
+| `fps` | `60` | FPS byte in the START/STOP packets |
+| `set_fps_cmd` | `1` | Send separate FPS command before START |
 | `yuv_order` | `2` | `0=UYVY`, `1=VYUY`, `2=YUYV`, `3=YVYU` |
 | `start_path` | `1` | START packet path byte |
 | `start_dst` | `1` | START packet destination byte |

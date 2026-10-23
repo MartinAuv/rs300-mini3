@@ -7,11 +7,14 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KERNEL_RELEASE="$(uname -r)"
-MODULE_DIR="/lib/modules/${KERNEL_RELEASE}/extra"
+MODULE_DIR="/lib/modules/${KERNEL_RELEASE}/updates"
+LEGACY_MODULE_DIR="/lib/modules/${KERNEL_RELEASE}/extra"
 BOOT_DIR="/boot"
+BACKUP_DIR="${BOOT_DIR}/rs300-backups"
 EXTLINUX_CONF="/boot/extlinux/extlinux.conf"
 DTBO_NAME="rs300-cam1.dtbo"
 DTBO_DEST="${BOOT_DIR}/${DTBO_NAME}"
+MERGED_DTB="${BOOT_DIR}/rs300-cam1-active.dtb"
 MODPROBE_CONF="/etc/modprobe.d/rs300.conf"
 VALIDATE_SCRIPT="/usr/local/sbin/rs300-validate.sh"
 LOAD_SERVICE="/etc/systemd/system/rs300-load.service"
@@ -106,6 +109,24 @@ current_default_label() {
     awk '$1 == "DEFAULT" { print $2; exit }' "$EXTLINUX_CONF"
 }
 
+append_overlay_csv() {
+    local current="$1"
+    local addition="$2"
+
+    case ",${current// /,}," in
+        *",${addition},"*)
+            printf '%s\n' "${current// /,}"
+            ;;
+        *)
+            if [ -n "$current" ]; then
+                printf '%s,%s\n' "${current// /,}" "$addition"
+            else
+                printf '%s\n' "$addition"
+            fi
+            ;;
+    esac
+}
+
 rewrite_extlinux_label() {
     local label="$1"
     local menu_label="$2"
@@ -166,7 +187,7 @@ rewrite_extlinux_label() {
 }
 
 install_extlinux_entry() {
-    local default_label source_label linux initrd fdt append overlays rs300_fdt
+    local default_label source_label linux initrd append overlays rs300_fdt
     local primary_linux primary_initrd primary_append primary_overlays
 
     [ -f "$EXTLINUX_CONF" ] || {
@@ -183,26 +204,15 @@ install_extlinux_entry() {
 
     linux="$(extlinux_value "$source_label" LINUX)"
     initrd="$(extlinux_value "$source_label" INITRD)"
-    fdt="$(extlinux_value "$source_label" FDT)"
     append="$(extlinux_value "$source_label" APPEND)"
     overlays="$(extlinux_value "$source_label" OVERLAYS)"
-    
-    # NEU: FDT je nach Parameter anpassen
-    if [ "$SET_DEFAULT" -eq 1 ]; then
-        rs300_fdt="/boot/rs300-cam1-active.dtb"
-    else
-        rs300_fdt="$(extlinux_value rs300_cam1_dtb FDT)"
-        [ -n "$rs300_fdt" ] || rs300_fdt="$fdt"
-    fi
+    rs300_fdt="$MERGED_DTB"
 
     [ -n "$linux" ] || linux="/boot/Image"
     [ -n "$initrd" ] || initrd="/boot/initrd"
-    [ -n "$append" ] || append='${cbootargs} root=/dev/nvme0n1p1 rw rootwait rootfstype=ext4'
+    [ -n "$append" ] || append='${cbootargs}'
 
-    case " ${overlays} " in
-        *" ${DTBO_DEST} "*) ;;
-        *) overlays="${overlays:+$overlays }${DTBO_DEST}" ;;
-    esac
+    overlays="$(append_overlay_csv "$overlays" "$DTBO_DEST")"
 
     backup_file "$EXTLINUX_CONF"
     rewrite_extlinux_label \
@@ -227,10 +237,7 @@ install_extlinux_entry() {
             [ -n "$primary_initrd" ] || primary_initrd="$initrd"
             [ -n "$primary_append" ] || primary_append="$append"
 
-            case " ${primary_overlays} " in
-                *" ${DTBO_DEST} "*) ;;
-                *) primary_overlays="${primary_overlays:+$primary_overlays }${DTBO_DEST}" ;;
-            esac
+            primary_overlays="$(append_overlay_csv "$primary_overlays" "$DTBO_DEST")"
 
             rewrite_extlinux_label \
                 "primary" \
@@ -244,46 +251,131 @@ install_extlinux_entry() {
     fi
 }
 
+dtb_has_symbols() {
+    local dtb="$1"
+
+    [ -f "$dtb" ] || return 1
+    fdtget "$dtb" /__symbols__ gpio >/dev/null 2>&1 &&
+        fdtget "$dtb" /__symbols__ gpio_aon >/dev/null 2>&1 &&
+        fdtget "$dtb" /__symbols__ cam_i2c >/dev/null 2>&1
+}
+
 find_rs300_base_dtb() {
+    local saved_fdt="${BACKUP_DIR}/base-fdt.dtb"
     local fdt cand pat
     shopt -s nullglob extglob
 
-    fdt="$(extlinux_value rs300_cam1 FDT || true)"
-    if [ -n "$fdt" ] && [ -f "$fdt" ]; then
-        echo "Using base DTB for merge: $fdt (source: extlinux rs300_cam1)" >&2
-        printf '%s\n' "$fdt"; return 0
+    mkdir -p "$BACKUP_DIR"
+
+    # 1. Prefer a previously saved pristine snapshot of the live UEFI-merged
+    #    /sys/firmware/fdt (preserves all JetPack 7.2 UEFI carrier/SKU/carveout
+    #    overlays across repeated install.sh runs).
+    if dtb_has_symbols "$saved_fdt"; then
+        echo "Using base DTB for merge: $saved_fdt (cached live FDT snapshot)" >&2
+        printf '%s\n' "$saved_fdt"
+        return 0
     fi
 
-    fdt="$(extlinux_value rs300_cam1_dtb FDT || true)"
-    if [ -n "$fdt" ] && [ -f "$fdt" ]; then
-        echo "Using base DTB for merge: $fdt (source: extlinux rs300_cam1_dtb)" >&2
-        printf '%s\n' "$fdt"; return 0
+    # 2. If running on the live Jetson and /sys/firmware/fdt has symbols and
+    #    does not yet contain rs300@3c, snapshot it as our clean base-fdt.dtb.
+    if [ -r /sys/firmware/fdt ] && dtb_has_symbols /sys/firmware/fdt; then
+        if ! fdtget /sys/firmware/fdt /bus@0/cam_i2cmux/i2c@1/rs300@3c compatible >/dev/null 2>&1; then
+            cp /sys/firmware/fdt "$saved_fdt"
+            chmod 0644 "$saved_fdt"
+            echo "Using base DTB for merge: $saved_fdt (captured from live /sys/firmware/fdt)" >&2
+            printf '%s\n' "$saved_fdt"
+            return 0
+        fi
     fi
 
+    # 3. Check explicit extlinux FDT entries (excluding our generated output).
+    for label in primary rs300_cam1 rs300_cam1_dtb; do
+        if [ -f "$EXTLINUX_CONF" ]; then
+            fdt="$(extlinux_value "$label" FDT || true)"
+            if [ -n "$fdt" ] && [ "$fdt" != "$MERGED_DTB" ] && dtb_has_symbols "$fdt"; then
+                echo "Using base DTB for merge: $fdt (source: extlinux $label)" >&2
+                printf '%s\n' "$fdt"
+                return 0
+            fi
+        fi
+    done
+
+    # 4. Search /boot and /boot/dtb for JetPack 6.x (jnx120) and JetPack 7.2+ (jnx42) DTBs.
     local patterns=(
-        "${BOOT_DIR}/kernel_tegra234-auvidea-jnx120?(x)+p3767-[0-9][0-9][0-9][0-9]-nv-rs300-cam1.dtb"
-        "${BOOT_DIR}/kernel_tegra234-auvidea-jnx120?(x)+p3767-[0-9][0-9][0-9][0-9]-nv.dtb"
-        "${BOOT_DIR}/tegra234-p3737-[0-9][0-9][0-9][0-9]+p3701-[0-9][0-9][0-9][0-9]-nv.dtb"
+        "${BOOT_DIR}/dtb/kernel_tegra234-auvidea-jnx120?(x)+p3767-[0-9][0-9][0-9][0-9]-nv*.dtb"
+        "${BOOT_DIR}/kernel_tegra234-auvidea-jnx120?(x)+p3767-[0-9][0-9][0-9][0-9]-nv*.dtb"
+        "${BOOT_DIR}/dtb/tegra234-auvidea-jnx120?(x)+p3767-[0-9][0-9][0-9][0-9]-nv*.dtb"
+        "${BOOT_DIR}/tegra234-auvidea-jnx120?(x)+p3767-[0-9][0-9][0-9][0-9]-nv*.dtb"
+        "${BOOT_DIR}/dtb/kernel_tegra234-auvidea-jnx42+p3767-[0-9][0-9][0-9][0-9]-nv*.dtb"
+        "${BOOT_DIR}/kernel_tegra234-auvidea-jnx42+p3767-[0-9][0-9][0-9][0-9]-nv*.dtb"
+        "${BOOT_DIR}/dtb/tegra234-auvidea-jnx42+p3767-[0-9][0-9][0-9][0-9]-nv*.dtb"
+        "${BOOT_DIR}/tegra234-auvidea-jnx42+p3767-[0-9][0-9][0-9][0-9]-nv*.dtb"
+        "${BOOT_DIR}/dtb/tegra234-p3768-[0-9][0-9][0-9][0-9]+p3767-[0-9][0-9][0-9][0-9]-nv*.dtb"
+        "${BOOT_DIR}/tegra234-p3768-[0-9][0-9][0-9][0-9]+p3767-[0-9][0-9][0-9][0-9]-nv*.dtb"
+        "${BOOT_DIR}/tegra234-p3737-[0-9][0-9][0-9][0-9]+p3701-[0-9][0-9][0-9][0-9]-nv*.dtb"
     )
 
     for pat in "${patterns[@]}"; do
         for cand in $pat; do
-            if [ -f "$cand" ]; then
+            if [ "$cand" != "$MERGED_DTB" ] && dtb_has_symbols "$cand"; then
                 echo "Using base DTB for merge: $cand" >&2
-                printf '%s\n' "$cand"; return 0
+                printf '%s\n' "$cand"
+                return 0
             fi
         done
     done
 
-    echo "Could not find an RS300 base DTB. Expected one of the known patterns in ${BOOT_DIR}" >&2
+    # 5. Final fallback to live /sys/firmware/fdt even if rs300@3c was already merged.
+    if [ -r /sys/firmware/fdt ] && dtb_has_symbols /sys/firmware/fdt; then
+        cp /sys/firmware/fdt "$saved_fdt"
+        chmod 0644 "$saved_fdt"
+        echo "Using base DTB for merge: $saved_fdt (fallback from live /sys/firmware/fdt)" >&2
+        printf '%s\n' "$saved_fdt"
+        return 0
+    fi
+
+    echo "Could not find an RS300 base DTB in /sys/firmware/fdt or ${BOOT_DIR}" >&2
     return 1
 }
 
+build_merged_dtb() {
+    local base_dtb tmp_dtb
+    local overlays=()
+
+    need_cmd fdtoverlay
+    need_cmd fdtget
+
+    base_dtb="$(find_rs300_base_dtb)"
+    tmp_dtb="${MERGED_DTB}.tmp"
+
+    if ! fdtget "$base_dtb" /reserved-memory/vpr-carveout compatible >/dev/null 2>&1; then
+        [ -f "${BOOT_DIR}/tegra234-carveouts.dtbo" ] && overlays+=("${BOOT_DIR}/tegra234-carveouts.dtbo")
+    fi
+    if ! fdtget "$base_dtb" /firmware/optee compatible >/dev/null 2>&1; then
+        [ -f "${BOOT_DIR}/tegra-optee.dtbo" ] && overlays+=("${BOOT_DIR}/tegra-optee.dtbo")
+    fi
+    overlays+=("$DTBO_DEST")
+
+    fdtoverlay -i "$base_dtb" -o "$tmp_dtb" "${overlays[@]}"
+
+    if command -v fdtput >/dev/null 2>&1; then
+        fdtput -d "$tmp_dtb" /chosen linux,initrd-start 2>/dev/null || true
+        fdtput -d "$tmp_dtb" /chosen linux,initrd-end 2>/dev/null || true
+    fi
+
+    fdtget "$tmp_dtb" /bus@0/cam_i2cmux/i2c@1/rs300@3c compatible >/dev/null
+    fdtget "$tmp_dtb" /bus@0/cam_i2cmux/i2c@1/rs300@3c power-gpios >/dev/null
+    fdtget "$tmp_dtb" /bus@0/gpio@c2f0000/gbe-switch-rst label >/dev/null
+
+    chmod 0644 "$tmp_dtb"
+    mv -f "$tmp_dtb" "$MERGED_DTB"
+    echo "Built merged RS300 DTB: ${MERGED_DTB}"
+}
 
 active_slot_dtb_partlabel() {
     local slot
 
-    slot="$(nvbootctrl get-current-slot 2>/dev/null || true)"
+    slot="$(nvbootctrl get-current-slot 2>/dev/null || nvbootctrl -t rootfs get-current-slot 2>/dev/null || true)"
     case "$slot" in
         0|A|a) printf '%s\n' "A_kernel-dtb" ;;
         1|B|b) printf '%s\n' "B_kernel-dtb" ;;
@@ -295,16 +387,14 @@ active_slot_dtb_partlabel() {
 }
 
 install_active_slot_dtb() {
-    local base_dtb merged_dtb partlabel part size part_size backup_dir backup
+    local partlabel part size part_size backup
 
-    need_cmd fdtoverlay
-    need_cmd fdtget
     need_cmd nvbootctrl
     need_cmd blockdev
     need_cmd dd
 
-    base_dtb="$(find_rs300_base_dtb)"
-    merged_dtb="${BOOT_DIR}/rs300-cam1-active.dtb"
+    [ -f "$MERGED_DTB" ] || build_merged_dtb
+
     partlabel="$(active_slot_dtb_partlabel)"
     part="/dev/disk/by-partlabel/${partlabel}"
 
@@ -313,24 +403,19 @@ install_active_slot_dtb() {
         return 1
     }
 
-    fdtoverlay -i "$base_dtb" -o "$merged_dtb" "$DTBO_DEST"
-    fdtget "$merged_dtb" /bus@0/cam_i2cmux/i2c@1/rs300@3c compatible >/dev/null
-    fdtget "$merged_dtb" /bus@0/cam_i2cmux/i2c@1/rs300@3c power-gpios >/dev/null
-
-    size="$(stat -c%s "$merged_dtb")"
+    size="$(stat -c%s "$MERGED_DTB")"
     part_size="$(blockdev --getsize64 "$part")"
     if [ "$size" -gt "$part_size" ]; then
         echo "Merged DTB (${size} bytes) is larger than ${part} (${part_size} bytes)" >&2
         return 1
     fi
 
-    backup_dir="${BOOT_DIR}/rs300-backups"
-    mkdir -p "$backup_dir"
-    backup="${backup_dir}/${partlabel}-$(date -u +%Y%m%dT%H%M%SZ).dtb"
+    mkdir -p "$BACKUP_DIR"
+    backup="${BACKUP_DIR}/${partlabel}-$(date -u +%Y%m%dT%H%M%SZ).dtb"
     dd if="$part" of="$backup" bs=1M status=none
     chmod 0644 "$backup"
 
-    dd if="$merged_dtb" of="$part" bs=4K conv=fsync status=none
+    dd if="$MERGED_DTB" of="$part" bs=4K conv=fsync status=none
     echo "Installed merged RS300 DTB to ${part} (${partlabel}); backup: ${backup}"
 }
 
@@ -435,25 +520,25 @@ EOF
 
     cat >"$LOAD_SERVICE" <<EOF
 [Unit]
-Description=Load and validate RS300/WN2640 CAM1 thermal camera
+Description=Load and validate RS300/WN2640 CAM1 thermal camera (640x512)
 After=systemd-udev-settle.service
 
 [Service]
 Type=oneshot
-1. Dem Jetson 3 Sekunden Zeit geben, bis alle Power-Domains stehen
+# 1. Wait 3 seconds for Jetson power domains and CSI/I2C mux to settle
 ExecStartPre=/bin/sleep 3
 
-2. Treiber laden (1. Versuch / Power-On)
-ExecStart=/sbin/modprobe rs300 set_fps_cmd=1 native_y16=1 power_on_delay_ms=1500
+# 2. Load driver (1st pass / power-on)
+ExecStart=/sbin/modprobe rs300 set_fps_cmd=1 power_on_delay_ms=1500
 
-3. Soft-Reset: Kurz warten, entladen, neu laden (das erzwingt dein funktionierendes Schema)
+# 3. Soft-reset: briefly wait, unload, and reload with full power_on_delay_ms
 ExecStartPost=/bin/sleep 1
 ExecStartPost=-/sbin/rmmod rs300
 ExecStartPost=/bin/sleep 1
-ExecStartPost=/sbin/modprobe rs300 set_fps_cmd=1 native_y16=1 power_on_delay_ms=4500
+ExecStartPost=/sbin/modprobe rs300 set_fps_cmd=1 power_on_delay_ms=4500
 
-# 4. Erst jetzt das Validate-Skript starten
-ExecStartPost=/usr/local/sbin/rs300-validate.sh auto
+# 4. Run readiness validation script
+ExecStartPost=${VALIDATE_SCRIPT} ${VIDEO_DEV}
 
 RemainAfterExit=yes
 
@@ -476,14 +561,19 @@ make clean
 make
 make dtbo
 
+rm -f "${LEGACY_MODULE_DIR}/rs300.ko"
 install -D -m 0644 rs300.ko "${MODULE_DIR}/rs300.ko"
 install -D -m 0644 "${DTBO_NAME}" "$DTBO_DEST"
 depmod -a
 
 cat >"$MODPROBE_CONF" <<'EOF'
 blacklist rs300
-options rs300 mode=0 fps=60 set_fps_cmd=1 type=16 output_source=-1 yuv_order=2 start_path=1 start_dst=1 start_width=0 start_height=0 advertise_width=0 advertise_height=0 power_on_delay_ms=8000 auto_shutter=0 startup_ffc=0 native_y16=0
+options rs300 mode=640 fps=60 set_fps_cmd=1 type=16 output_source=-1 yuv_order=2 start_path=1 start_dst=1 power_on_delay_ms=8000 auto_shutter=0 startup_ffc=0 native_y16=0
 EOF
+
+if [ "$UPDATE_EXTLINUX" -eq 1 ] || [ "$INSTALL_SLOT_DTB" -eq 1 ]; then
+    build_merged_dtb
+fi
 
 if [ "$INSTALL_SERVICE" -eq 1 ]; then
     install_validation_service
@@ -499,7 +589,7 @@ fi
 
 systemctl disable --now cam1-pac00-high.service >/dev/null 2>&1 || true
 
-echo "Installed rs300.ko, ${DTBO_DEST}, and ${MODPROBE_CONF}."
+echo "Installed ${MODULE_DIR}/rs300.ko, ${DTBO_DEST}, and ${MODPROBE_CONF}."
 if [ "$UPDATE_EXTLINUX" -eq 1 ]; then
     echo "Installed/updated extlinux label: rs300_cam1"
     [ "$SET_DEFAULT" -eq 1 ] && echo "Set DEFAULT rs300_cam1."
@@ -511,11 +601,11 @@ if [ "$INSTALL_SERVICE" -eq 1 ]; then
     echo "Enabled rs300-load.service with ${VIDEO_DEV} validation."
 fi
 
-# NEU: Abhängigkeiten installieren
 echo "Installing required dependencies (GStreamer, OpenCV, v4l-utils)..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y || true
 apt-get install -y \
+    device-tree-compiler \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
