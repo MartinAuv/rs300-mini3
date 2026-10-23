@@ -43,22 +43,53 @@ sudo reboot
 
 The installer:
 
-- Builds `rs300.ko`
+- Ensures custom Auvidea carrier board `dpkg` safety (`/opt/nvidia/l4t-packages/.nv-l4t-disable-boot-fw-update-in-preinstall` and `apt-mark hold` on L4T kernel/bootloader packages)
+- Installs required runtime packages (GStreamer plugins, `python3-opencv`, `v4l-utils`, `device-tree-compiler`)
+- Builds `rs300.ko` and installs `/lib/modules/$(uname -r)/updates/rs300.ko`
 - Builds and installs `/boot/rs300-cam1.dtbo`
-- Installs `/lib/modules/$(uname -r)/extra/rs300.ko`
 - Writes `/etc/modprobe.d/rs300.conf`
 - Adds or updates the `rs300_cam1` extlinux boot entry
 - With `--set-default`, also mirrors the RS300 DTB/overlay into the NVIDIA
-  `primary` extlinux entry. Some Jetson UEFI setups keep booting `primary`
-  even when `DEFAULT` points at another label.
+  `primary` extlinux entry and sets `DEFAULT rs300_cam1`
 - Merges the overlay into `/boot/rs300-cam1-active.dtb` and writes it to the
   active `A_kernel-dtb`/`B_kernel-dtb` partition with a backup under
   `/boot/rs300-backups`. Use `--no-slot-dtb` only if your bootloader is known
   to honor extlinux `FDT`/`OVERLAYS` directly.
-- Enables `rs300-load.service`
-- Disables the legacy `cam1-pac00-high.service` if it exists
+- Enables `rs300-load.service` (which powers up the camera after boot, soft-resets the module, and validates 90 frames at `640x512`)
+- Marks `stream_thermal.sh` and `stream_thermal.py` executable
 
-After reboot:
+## Quick Start: Stream Thermal Video Over the Network
+
+Once the Jetson is installed and booted:
+
+1. **On the Jetson Orin NX**, run:
+
+```sh
+cd rs300-mini3/platforms/nvidia/orin-nx
+./stream_thermal.sh
+```
+
+The script will:
+- Prompt for the destination IP address (press `Enter` for the default `192.168.103.166`, or pass it directly via `./stream_thermal.sh <TARGET_IP> [PORT]`),
+- Wait automatically if `rs300-load.service` is still finishing its boot-time initialization,
+- Auto-detect the RS300 `/dev/video*` node and ensure `output_mode=1` (16-bit thermal mode) is active,
+- Normalize the 16-bit raw thermal data with exponential min/max smoothing (`alpha = 0.1`) to 8-bit and stream H.264 over RTP/UDP (port `5000`).
+
+2. **On the receiving PC (`<TARGET_IP>`)**, view the H.264 stream with GStreamer:
+
+```sh
+gst-launch-1.0 -e \
+  udpsrc port=5000 caps='application/x-rtp,media=(string)video,clock-rate=(int)90000,encoding-name=(string)H264,payload=(int)96' \
+  ! rtph264depay \
+  ! h264parse \
+  ! avdec_h264 \
+  ! videoconvert \
+  ! autovideosink sync=false
+```
+
+---
+
+## Manual Verification After Reboot
 
 ```sh
 systemctl status rs300-load.service
